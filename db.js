@@ -48,6 +48,14 @@ db.exec(`
   );
 `);
 
+// Migration: add role column to existing baristas tables that predate it.
+{
+  const cols = db.prepare("PRAGMA table_info(baristas)").all();
+  if (!cols.some((c) => c.name === 'role')) {
+    db.exec("ALTER TABLE baristas ADD COLUMN role TEXT NOT NULL DEFAULT 'barista'");
+  }
+}
+
 const DRINKS_REQUIRED = parseInt(process.env.DRINKS_REQUIRED || '6', 10);
 
 // node:sqlite doesn't ship a transaction helper, so we wrap manually.
@@ -146,16 +154,18 @@ function hashCode(code) {
   return crypto.createHash('sha256').update(String(code)).digest('hex');
 }
 
-function upsertBarista({ name, phone }) {
+function upsertBarista({ name, phone, role = 'barista' }) {
   const existing = db.prepare('SELECT * FROM baristas WHERE phone = ?').get(phone);
   if (existing) {
-    db.prepare('UPDATE baristas SET name = ?, active = 1 WHERE phone = ?').run(name, phone);
+    db.prepare(
+      'UPDATE baristas SET name = ?, role = ?, active = 1 WHERE phone = ?'
+    ).run(name, role, phone);
     return db.prepare('SELECT * FROM baristas WHERE phone = ?').get(phone);
   }
   const id = crypto.randomUUID();
   db.prepare(
-    'INSERT INTO baristas (id, name, phone, active, created_at) VALUES (?, ?, ?, 1, ?)'
-  ).run(id, name, phone, Date.now());
+    'INSERT INTO baristas (id, name, phone, role, active, created_at) VALUES (?, ?, ?, ?, 1, ?)'
+  ).run(id, name, phone, role, Date.now());
   return db.prepare('SELECT * FROM baristas WHERE id = ?').get(id);
 }
 
@@ -168,7 +178,9 @@ function getBaristaById(id) {
 }
 
 function listBaristas() {
-  return db.prepare('SELECT id, name, phone, active FROM baristas ORDER BY created_at').all();
+  return db
+    .prepare('SELECT id, name, phone, role, active FROM baristas ORDER BY created_at')
+    .all();
 }
 
 function saveOtp(phone, code, ttlMs) {
@@ -180,6 +192,104 @@ function saveOtp(phone, code, ttlMs) {
                                       expires_at = excluded.expires_at,
                                       attempts = 0`
   ).run(phone, hashCode(code), expires);
+}
+
+// ---------- owner dashboard stats ----------
+
+function getOwnerStats() {
+  const n = (v) => Number(v ?? 0);
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const todayMs = startOfDay.getTime();
+  const weekMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const monthMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+  const totalCustomers = n(
+    db.prepare('SELECT COUNT(*) c FROM customers').get().c
+  );
+  const totalPaid = n(
+    db.prepare("SELECT COUNT(*) c FROM purchases WHERE type='paid'").get().c
+  );
+  const totalFree = n(
+    db.prepare("SELECT COUNT(*) c FROM purchases WHERE type='free'").get().c
+  );
+  const drinksToday = n(
+    db
+      .prepare("SELECT COUNT(*) c FROM purchases WHERE type='paid' AND created_at >= ?")
+      .get(todayMs).c
+  );
+  const drinksThisWeek = n(
+    db
+      .prepare("SELECT COUNT(*) c FROM purchases WHERE type='paid' AND created_at >= ?")
+      .get(weekMs).c
+  );
+  const drinksThisMonth = n(
+    db
+      .prepare("SELECT COUNT(*) c FROM purchases WHERE type='paid' AND created_at >= ?")
+      .get(monthMs).c
+  );
+  const newCustomersThisWeek = n(
+    db
+      .prepare('SELECT COUNT(*) c FROM customers WHERE created_at >= ?')
+      .get(weekMs).c
+  );
+
+  const topCustomers = db
+    .prepare(
+      `SELECT c.id, c.name, c.phone,
+              SUM(CASE WHEN p.type='paid' THEN 1 ELSE 0 END) AS paid,
+              SUM(CASE WHEN p.type='free' THEN 1 ELSE 0 END) AS free
+         FROM customers c
+         LEFT JOIN purchases p ON p.customer_id = c.id
+        GROUP BY c.id
+        ORDER BY paid DESC, c.created_at ASC
+        LIMIT 10`
+    )
+    .all()
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      phone: r.phone,
+      paid: n(r.paid),
+      free: n(r.free),
+    }));
+
+  const recentActivity = db
+    .prepare(
+      `SELECT p.type, p.barista, p.created_at, c.name AS customer_name
+         FROM purchases p
+         JOIN customers c ON c.id = p.customer_id
+        ORDER BY p.created_at DESC
+        LIMIT 20`
+    )
+    .all();
+
+  const perBarista = db
+    .prepare(
+      `SELECT COALESCE(barista, 'Unknown') AS barista, COUNT(*) AS drinks
+         FROM purchases
+        WHERE type = 'paid'
+        GROUP BY barista
+        ORDER BY drinks DESC`
+    )
+    .all()
+    .map((r) => ({ barista: r.barista, drinks: n(r.drinks) }));
+
+  return {
+    totals: {
+      customers: totalCustomers,
+      newCustomersThisWeek,
+      drinksAllTime: totalPaid,
+      freeDrinksRedeemed: totalFree,
+      drinksToday,
+      drinksThisWeek,
+      drinksThisMonth,
+    },
+    topCustomers,
+    recentActivity,
+    perBarista,
+  };
 }
 
 function consumeOtp(phone, code) {
@@ -219,4 +329,5 @@ module.exports = {
   listBaristas,
   saveOtp,
   consumeOtp,
+  getOwnerStats,
 };

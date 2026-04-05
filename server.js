@@ -21,6 +21,7 @@ const {
   listBaristas,
   saveOtp,
   consumeOtp,
+  getOwnerStats,
 } = require('./db');
 
 const apple = require('./wallet/apple');
@@ -33,23 +34,38 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret';
 const SHOP_NAME = process.env.SHOP_NAME || 'Coffee Shop';
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-// Seed baristas from env var: BARISTA_PHONES="+96891234567:Ahmed,+96899887766:Sara"
-(function seedBaristas() {
-  const raw = process.env.BARISTA_PHONES || '';
-  if (!raw.trim()) return;
-  for (const entry of raw.split(',')) {
-    const [phoneRaw, ...nameParts] = entry.split(':');
-    const phone = normalizeOmaniPhone((phoneRaw || '').trim());
-    const name = nameParts.join(':').trim() || 'Barista';
-    if (!phone) {
-      console.warn(`Skipping invalid BARISTA_PHONES entry: ${entry}`);
-      continue;
+// Seed staff from env. Owners outrank baristas (and can also mark drinks).
+//   BARISTA_PHONES="+96891234567:Ahmed,+96899887766:Sara"
+//   OWNER_PHONES="+96890000000:The Boss"
+(function seedStaff() {
+  function parseList(raw, role) {
+    if (!raw || !raw.trim()) return;
+    for (const entry of raw.split(',')) {
+      const [phoneRaw, ...nameParts] = entry.split(':');
+      const phone = normalizeOmaniPhone((phoneRaw || '').trim());
+      const name = nameParts.join(':').trim() || (role === 'owner' ? 'Owner' : 'Barista');
+      if (!phone) {
+        console.warn(`Skipping invalid ${role.toUpperCase()}_PHONES entry: ${entry}`);
+        continue;
+      }
+      upsertBarista({ phone, name, role });
     }
-    upsertBarista({ phone, name });
   }
+  // Seed baristas first, then owners, so that if a number appears in both
+  // lists the owner role wins (upsert updates the role).
+  parseList(process.env.BARISTA_PHONES, 'barista');
+  parseList(process.env.OWNER_PHONES, 'owner');
+
   const all = listBaristas();
   if (all.length) {
-    console.log(`👥 Registered baristas: ${all.map(b => `${b.name} (${b.phone})`).join(', ')}`);
+    const owners = all.filter((b) => b.role === 'owner');
+    const baristas = all.filter((b) => b.role !== 'owner');
+    if (owners.length) {
+      console.log(`👑 Owners:   ${owners.map((b) => `${b.name} (${b.phone})`).join(', ')}`);
+    }
+    if (baristas.length) {
+      console.log(`👥 Baristas: ${baristas.map((b) => `${b.name} (${b.phone})`).join(', ')}`);
+    }
   }
 })();
 
@@ -87,15 +103,15 @@ function verifyCustomerToken(token) {
   }
 }
 
-function signBaristaToken(barista) {
+function signStaffToken(staff) {
   return jwt.sign(
-    { kind: 'barista', sub: barista.id, name: barista.name },
+    { kind: 'barista', sub: staff.id, name: staff.name, role: staff.role || 'barista' },
     JWT_SECRET,
     { expiresIn: '30d' }
   );
 }
 
-function requireBarista(req, res, next) {
+function requireStaff(req, res, next) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'unauthorized' });
@@ -104,11 +120,20 @@ function requireBarista(req, res, next) {
     if (p.kind !== 'barista') throw new Error();
     const row = getBaristaById(p.sub);
     if (!row) return res.status(401).json({ error: 'unauthorized' });
-    req.barista = { id: row.id, name: row.name };
+    req.staff = { id: row.id, name: row.name, role: row.role || 'barista' };
     next();
   } catch {
     res.status(401).json({ error: 'unauthorized' });
   }
+}
+
+function requireOwner(req, res, next) {
+  requireStaff(req, res, () => {
+    if (req.staff.role !== 'owner') {
+      return res.status(403).json({ error: 'owner access required' });
+    }
+    next();
+  });
 }
 
 // ---------- public routes ----------
@@ -235,7 +260,7 @@ app.post('/api/barista/request-code', otpRequestLimiter, async (req, res) => {
     phone,
     `${SHOP_NAME}: your staff login code is ${code}. It expires in 5 minutes.`
   );
-  res.json({ sent: true, name: barista.name });
+  res.json({ sent: true, name: barista.name, role: barista.role || 'barista' });
 });
 
 app.post('/api/barista/verify-code', otpVerifyLimiter, (req, res) => {
@@ -256,10 +281,14 @@ app.post('/api/barista/verify-code', otpVerifyLimiter, (req, res) => {
     };
     return res.status(401).json({ error: map[result.reason] || 'Verification failed.' });
   }
-  res.json({ token: signBaristaToken(barista), name: barista.name });
+  res.json({
+    token: signStaffToken(barista),
+    name: barista.name,
+    role: barista.role || 'barista',
+  });
 });
 
-app.post('/api/barista/scan', requireBarista, (req, res) => {
+app.post('/api/barista/scan', requireStaff, (req, res) => {
   const token = String(req.body.token || '');
   const id = verifyCustomerToken(token);
   if (!id) return res.status(404).json({ error: 'Invalid customer QR' });
@@ -271,18 +300,24 @@ app.post('/api/barista/scan', requireBarista, (req, res) => {
   });
 });
 
-app.post('/api/barista/purchase', requireBarista, (req, res) => {
+app.post('/api/barista/purchase', requireStaff, (req, res) => {
   const token = String(req.body.token || '');
   const id = verifyCustomerToken(token);
   if (!id) return res.status(404).json({ error: 'Invalid customer QR' });
   const customer = getCustomer(id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  const result = addPurchase(id, req.barista.name);
+  const result = addPurchase(id, req.staff.name);
   res.json({
     customer: { id: customer.id, name: customer.name },
-    barista: req.barista.name,
+    barista: req.staff.name,
     ...result,
   });
+});
+
+// ---------- owner dashboard ----------
+
+app.get('/api/owner/stats', requireOwner, (_req, res) => {
+  res.json(getOwnerStats());
 });
 
 // ---------- root ----------

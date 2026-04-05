@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Owner Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    .wrap { max-width: 820px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin: 12px 0 20px;
+    }
+    .kpi {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .kpi .num {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--accent-strong);
+    }
+    .kpi .lbl {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-top: 4px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #3a2d22; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    tr:last-child td { border-bottom: none; }
+    .rank { color: var(--muted); width: 24px; }
+    .num-cell { text-align: right; font-variant-numeric: tabular-nums; }
+    .refresh-row { display: flex; justify-content: space-between; align-items: center; }
+    .refresh-row .subtle { margin: 0; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .pill.paid { background: rgba(200,150,102,0.2); color: var(--accent-strong); }
+    .pill.free { background: rgba(125,200,138,0.2); color: var(--good); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo"><img src="/thePeak_logo_color.png" alt="Logo" /></div>
+    <h1 id="shop-name">Owner Dashboard</h1>
+
+    <!-- Login step 1: phone -->
+    <div class="card" id="phone-card">
+      <h2 style="margin-top:0">Sign in</h2>
+      <p>Enter your registered owner mobile number.</p>
+      <label for="phone">Mobile number</label>
+      <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="9XXX XXXX" />
+      <div id="phone-msg"></div>
+      <button id="phone-btn">Send code</button>
+    </div>
+
+    <!-- Login step 2: code -->
+    <div class="card" id="code-card" style="display:none">
+      <h2 style="margin-top:0">Enter code</h2>
+      <p id="code-hint">We sent a 6-digit code to your phone.</p>
+      <label for="code">6-digit code</label>
+      <input id="code" type="tel" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" />
+      <div id="code-msg"></div>
+      <button id="code-btn">Verify &amp; continue</button>
+      <button id="code-back" class="secondary">Use a different number</button>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dash" style="display:none">
+      <div class="card">
+        <div class="refresh-row">
+          <p class="subtle" id="welcome"></p>
+          <a href="#" id="logout" style="color:var(--accent)">Sign out</a>
+        </div>
+      </div>
+
+      <h2>Overview</h2>
+      <div class="grid" id="kpis"></div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Top customers</h2>
+        <table id="top-table">
+          <thead><tr><th class="rank">#</th><th>Name</th><th>Phone</th><th class="num-cell">Paid</th><th class="num-cell">Free</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="top-empty" class="subtle" style="display:none">No customers yet.</div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Drinks by barista</h2>
+        <table id="bar-table">
+          <thead><tr><th>Barista</th><th class="num-cell">Drinks</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="bar-empty" class="subtle" style="display:none">No purchases recorded yet.</div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Recent activity</h2>
+        <table id="act-table">
+          <thead><tr><th>When</th><th>Customer</th><th>Barista</th><th>Type</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="act-empty" class="subtle" style="display:none">Nothing yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let ownerToken = localStorage.getItem('ownerToken') || null;
+    let ownerName  = localStorage.getItem('ownerName')  || null;
+    let pendingPhone = null;
+
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+      document.getElementById('shop-name').textContent = cfg.shopName + ' — Dashboard';
+      document.title = cfg.shopName + ' — Dashboard';
+    });
+
+    function show(id) {
+      ['phone-card','code-card'].forEach(x => {
+        document.getElementById(x).style.display = x === id ? '' : 'none';
+      });
+      document.getElementById('dash').style.display = id === 'dash' ? '' : 'none';
+    }
+
+    // ---- login ----
+    async function requestCode() {
+      const phone = document.getElementById('phone').value.trim();
+      if (!phone) return;
+      const btn = document.getElementById('phone-btn');
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/barista/request-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          document.getElementById('phone-msg').innerHTML =
+            `<div class="msg error">${data.error || 'Could not send code.'}</div>`;
+          return;
+        }
+        if (data.role !== 'owner') {
+          document.getElementById('phone-msg').innerHTML =
+            '<div class="msg error">This number is not an owner account.</div>';
+          return;
+        }
+        pendingPhone = phone;
+        document.getElementById('code-hint').textContent =
+          `Welcome ${data.name}, we sent a 6-digit code to your phone.`;
+        show('code-card');
+        document.getElementById('code').focus();
+      } catch {
+        document.getElementById('phone-msg').innerHTML =
+          '<div class="msg error">Network error. Try again.</div>';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Send code';
+      }
+    }
+
+    async function verifyCode() {
+      const code = document.getElementById('code').value.trim();
+      if (code.length !== 6) {
+        document.getElementById('code-msg').innerHTML =
+          '<div class="msg error">Please enter all 6 digits.</div>';
+        return;
+      }
+      const btn = document.getElementById('code-btn');
+      btn.disabled = true; btn.textContent = 'Verifying…';
+      try {
+        const res = await fetch('/api/barista/verify-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: pendingPhone, code }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          document.getElementById('code-msg').innerHTML =
+            `<div class="msg error">${data.error || 'Verification failed.'}</div>`;
+          return;
+        }
+        if (data.role !== 'owner') {
+          document.getElementById('code-msg').innerHTML =
+            '<div class="msg error">This account is not an owner.</div>';
+          return;
+        }
+        ownerToken = data.token;
+        ownerName  = data.name;
+        localStorage.setItem('ownerToken', ownerToken);
+        localStorage.setItem('ownerName',  ownerName);
+        loadDashboard();
+      } catch {
+        document.getElementById('code-msg').innerHTML =
+          '<div class="msg error">Network error. Try again.</div>';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Verify & continue';
+      }
+    }
+
+    document.getElementById('phone-btn').addEventListener('click', requestCode);
+    document.getElementById('phone').addEventListener('keydown', e => { if (e.key === 'Enter') requestCode(); });
+    document.getElementById('code-btn').addEventListener('click', verifyCode);
+    document.getElementById('code').addEventListener('keydown', e => { if (e.key === 'Enter') verifyCode(); });
+    document.getElementById('code-back').addEventListener('click', () => {
+      pendingPhone = null;
+      document.getElementById('code').value = '';
+      document.getElementById('code-msg').innerHTML = '';
+      show('phone-card');
+    });
+
+    // ---- dashboard ----
+    function fmt(ts) {
+      const d = new Date(Number(ts));
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    }
+
+    async function loadDashboard() {
+      show('dash');
+      document.getElementById('welcome').textContent = `Signed in as ${ownerName}`;
+      const res = await fetch('/api/owner/stats', {
+        headers: { 'Authorization': 'Bearer ' + ownerToken },
+      });
+      if (res.status === 401 || res.status === 403) {
+        localStorage.removeItem('ownerToken');
+        localStorage.removeItem('ownerName');
+        ownerToken = null; ownerName = null;
+        show('phone-card');
+        return;
+      }
+      const data = await res.json();
+      renderKpis(data.totals);
+      renderTop(data.topCustomers);
+      renderBaristas(data.perBarista);
+      renderActivity(data.recentActivity);
+    }
+
+    function renderKpis(t) {
+      const cards = [
+        ['Drinks today', t.drinksToday],
+        ['This week', t.drinksThisWeek],
+        ['This month', t.drinksThisMonth],
+        ['All-time drinks', t.drinksAllTime],
+        ['Free drinks given', t.freeDrinksRedeemed],
+        ['Total customers', t.customers],
+        ['New this week', t.newCustomersThisWeek],
+      ];
+      document.getElementById('kpis').innerHTML = cards
+        .map(([lbl, num]) => `<div class="kpi"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`)
+        .join('');
+    }
+
+    function renderTop(rows) {
+      const body = document.querySelector('#top-table tbody');
+      const empty = document.getElementById('top-empty');
+      const table = document.getElementById('top-table');
+      if (!rows.length) { table.style.display='none'; empty.style.display=''; return; }
+      table.style.display=''; empty.style.display='none';
+      body.innerHTML = rows.map((r, i) => `
+        <tr>
+          <td class="rank">${i + 1}</td>
+          <td>${escapeHtml(r.name)}</td>
+          <td class="subtle">${escapeHtml(r.phone)}</td>
+          <td class="num-cell">${r.paid}</td>
+          <td class="num-cell">${r.free}</td>
+        </tr>`).join('');
+    }
+
+    function renderBaristas(rows) {
+      const body = document.querySelector('#bar-table tbody');
+      const empty = document.getElementById('bar-empty');
+      const table = document.getElementById('bar-table');
+      if (!rows.length) { table.style.display='none'; empty.style.display=''; return; }
+      table.style.display=''; empty.style.display='none';
+      body.innerHTML = rows.map(r => `
+        <tr><td>${escapeHtml(r.barista)}</td><td class="num-cell">${r.drinks}</td></tr>`).join('');
+    }
+
+    function renderActivity(rows) {
+      const body = document.querySelector('#act-table tbody');
+      const empty = document.getElementById('act-empty');
+      const table = document.getElementById('act-table');
+      if (!rows.length) { table.style.display='none'; empty.style.display=''; return; }
+      table.style.display=''; empty.style.display='none';
+      body.innerHTML = rows.map(r => `
+        <tr>
+          <td class="subtle">${fmt(r.created_at)}</td>
+          <td>${escapeHtml(r.customer_name)}</td>
+          <td class="subtle">${escapeHtml(r.barista || '—')}</td>
+          <td><span class="pill ${r.type}">${r.type}</span></td>
+        </tr>`).join('');
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+
+    document.getElementById('logout').addEventListener('click', (e) => {
+      e.preventDefault();
+      localStorage.removeItem('ownerToken');
+      localStorage.removeItem('ownerName');
+      ownerToken = null; ownerName = null;
+      show('phone-card');
+    });
+
+    if (ownerToken) loadDashboard();
+    // Auto-refresh every 60 s while signed in.
+    setInterval(() => { if (ownerToken) loadDashboard(); }, 60000);
+  </script>
+</body>
+</html>

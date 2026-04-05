@@ -28,6 +28,7 @@ Open:
 - `http://localhost:3000/register.html` — customer registration (this is what the shop QR points to).
 - `http://localhost:3000/card.html#<token>` — customer's personal card (the registration flow redirects here automatically).
 - `http://localhost:3000/barista.html` — staff scanner. Each barista signs in with their own mobile number (whitelisted via `BARISTA_PHONES`) and a one-time code.
+- `http://localhost:3000/dashboard.html` — owner dashboard (totals, drinks today/week/month, top customers, activity feed, per-barista breakdown). Sign-in is the same phone + OTP flow, but only numbers in `OWNER_PHONES` can see it.
 - `http://localhost:3000/shop-qr.png` — a printable PNG of your shop QR. Print it, laminate it, put it on the counter.
 
 ## How the flow works
@@ -45,7 +46,10 @@ You (the owner) don't issue PINs or manage accounts. Just put the staff phone nu
 
 ```
 BARISTA_PHONES=+96891234567:Ahmed,+96899887766:Sara
+OWNER_PHONES=+96890000000:The Boss
 ```
+
+Owners can do everything a barista can **and** can sign in to `/dashboard.html` to see totals, top customers, and activity. A phone number appearing in both lists is automatically upgraded to owner.
 
 On every server start, the list is upserted — so to add someone new, append them and restart. Numbers are matched against the Omani format (same validation as customers). Everything after the colon is the display name, attached to each purchase for your records.
 
