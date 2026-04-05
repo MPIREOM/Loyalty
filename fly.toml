@@ -1,0 +1,45 @@
+# Fly.io configuration for the coffee loyalty server.
+#
+# IMPORTANT: change `app` below to a unique name before running `fly launch`
+# (or let `fly launch --copy-config` generate one for you). The `primary_region`
+# is set to Mumbai ("bom") because it's Fly's closest region to Oman — change
+# it if you prefer a different one (`fly platform regions` for the full list).
+
+app = "change-me-to-your-shop-name"
+primary_region = "bom"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  DATA_DIR = "/data"
+
+# SQLite database lives on a persistent volume so it survives deploys and
+# machine restarts. Create it once with:
+#   fly volumes create loyalty_data --region bom --size 1
+[[mounts]]
+  source = "loyalty_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Keep at least one machine running so the first customer of the day
+  # doesn't wait for a cold start. A single shared-cpu-1x/256MB machine
+  # is cheap and plenty for one shop.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

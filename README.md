@@ -148,16 +148,108 @@ The card page will then show a **Save to Google Wallet** button which hits `/api
 | `GET` | `/api/qr/:token` | token | PNG of the customer's QR |
 | `GET` | `/shop-qr.png` | — | PNG of the shop registration QR |
 | `POST` | `/api/barista/request-code` | — | `{phone}` → sends OTP to whitelisted staff phone |
-| `POST` | `/api/barista/verify-code` | — | `{phone, code}` → `{token, name}` (30-day JWT) |
+| `POST` | `/api/barista/verify-code` | — | `{phone, code}` → `{token, name, role}` (10-year JWT) |
+| `GET` | `/api/owner/stats` | owner | Dashboard totals, top customers, activity, per-barista |
+| `GET` | `/healthz` | — | Liveness probe (returns `ok`) |
 | `POST` | `/api/barista/scan` | barista | `{token}` → customer preview |
 | `POST` | `/api/barista/purchase` | barista | `{token}` → records a drink, awards free when due |
 | `GET` | `/api/wallet/apple/:token` | token | `.pkpass` download |
 | `GET` | `/api/wallet/google/:token` | token | `{url}` to Google Wallet save page |
 
-## Deploying
+## Deploying to Fly.io (recommended)
 
-Any Node 20+ host works. Recommended:
+A ready-to-use `Dockerfile` and `fly.toml` are included. Fly gives you a free HTTPS subdomain, a persistent volume for the SQLite DB, and automatic restarts — all for a few dollars a month.
 
-- Put this behind HTTPS (Caddy, nginx + certbot, or a PaaS like Fly.io / Railway). Camera access in browsers **requires HTTPS**, otherwise the barista scanner will not work on a phone.
-- Set `BASE_URL` to your public `https://…` URL before generating the shop QR.
-- Back up `data/loyalty.db` regularly.
+### Prerequisites
+
+1. Install the Fly CLI: <https://fly.io/docs/flyctl/install/>
+2. `fly auth signup` (or `fly auth login` if you already have an account). You'll need to add a payment method, but a single shared-cpu-1x / 256 MB machine + 1 GB volume runs around **$2–3 per month**.
+
+### First-time deploy
+
+```bash
+# 1. Pick a unique app name (letters, numbers, dashes) and edit fly.toml.
+#    Replace:   app = "change-me-to-your-shop-name"
+#    with e.g.: app = "thepeak-loyalty"
+#
+#    If you prefer, let Fly pick one for you — delete the `app` line and run
+#    `fly launch --copy-config --no-deploy` which will generate a name.
+
+# 2. Create the app on Fly (reads fly.toml).
+fly apps create thepeak-loyalty
+
+# 3. Create the persistent volume that will hold data/loyalty.db.
+#    1 GB is way more than a coffee shop will ever need.
+fly volumes create loyalty_data --region bom --size 1 --app thepeak-loyalty
+
+# 4. Set your secrets. These are stored encrypted on Fly and injected as
+#    environment variables — never commit them to git.
+fly secrets set \
+  JWT_SECRET="$(openssl rand -hex 32)" \
+  SHOP_NAME="The Peak Coffee" \
+  BASE_URL="https://thepeak-loyalty.fly.dev" \
+  BARISTA_PHONES="+96891234567:Ahmed,+96899887766:Sara" \
+  OWNER_PHONES="+96890000000:Owner Name" \
+  --app thepeak-loyalty
+
+# 5. Deploy.
+fly deploy --app thepeak-loyalty
+```
+
+That's it. Your server is now live at `https://thepeak-loyalty.fly.dev` with HTTPS automatically. Open:
+
+- `/register.html` on any phone to register a customer.
+- `/barista.html` for baristas to sign in.
+- `/dashboard.html` for the owner dashboard.
+- `/shop-qr.png` to download the printable QR that points at your live URL.
+
+### Day-to-day operations
+
+```bash
+# Tail logs (useful for reading a barista's OTP the first time they set up).
+fly logs --app thepeak-loyalty
+
+# Add a new barista: update the secret and the app restarts automatically.
+fly secrets set \
+  BARISTA_PHONES="+96891234567:Ahmed,+96899887766:Sara,+96898765432:Maryam" \
+  --app thepeak-loyalty
+
+# Push code changes.
+fly deploy --app thepeak-loyalty
+
+# SSH into the running machine (e.g. to inspect the SQLite DB directly).
+fly ssh console --app thepeak-loyalty
+#   then inside: apk add sqlite && sqlite3 /data/loyalty.db
+
+# Download a snapshot of the database for backup.
+fly ssh console --app thepeak-loyalty --command "cat /data/loyalty.db" > loyalty-backup.db
+```
+
+### Custom domain (optional)
+
+If you own e.g. `loyalty.thepeak.om`:
+
+```bash
+fly certs add loyalty.thepeak.om --app thepeak-loyalty
+# Fly will print a CNAME / A record to add at your DNS provider.
+# Once DNS propagates, also update the BASE_URL secret and redeploy so the
+# printed shop QR uses your custom domain:
+fly secrets set BASE_URL="https://loyalty.thepeak.om" --app thepeak-loyalty
+```
+
+### Backups
+
+The whole business is in one file: `/data/loyalty.db`. Options:
+
+- Quick manual backup: the `fly ssh console … > file.db` command above.
+- Automated: run [`litestream`](https://litestream.io) as a sidecar to continuously replicate the SQLite file to S3/Backblaze B2. Happy to add this if you want it.
+
+## Deploying elsewhere
+
+The `Dockerfile` is generic — it will run on Railway, Render, a VPS (with `docker run -v`), a Raspberry Pi, etc. Key things to remember on any host:
+
+- Node.js 22.5 or newer (for the built-in `node:sqlite` module). The Docker image already uses Node 22.
+- Set `DATA_DIR` to a persistent path, and mount a volume/disk there.
+- Put it behind HTTPS — camera access in browsers **requires HTTPS**, otherwise the barista scanner will not work on a phone.
+- Set `BASE_URL` to your public `https://…` URL **before** printing the shop QR (`/shop-qr.png`).
+- Back up `$DATA_DIR/loyalty.db` regularly.

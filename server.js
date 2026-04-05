@@ -107,7 +107,7 @@ function signStaffToken(staff) {
   return jwt.sign(
     { kind: 'barista', sub: staff.id, name: staff.name, role: staff.role || 'barista' },
     JWT_SECRET,
-    { expiresIn: '30d' }
+    { expiresIn: '10y' }
   );
 }
 
@@ -320,14 +320,38 @@ app.get('/api/owner/stats', requireOwner, (_req, res) => {
   res.json(getOwnerStats());
 });
 
-// ---------- root ----------
+// ---------- health + root ----------
+
+// Liveness probe for Fly / any uptime monitor. Intentionally trivial.
+app.get('/healthz', (_req, res) => {
+  res.type('text/plain').send('ok');
+});
 
 app.get('/', (_req, res) => {
   res.redirect('/register.html');
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`☕ ${SHOP_NAME} loyalty server listening on ${BASE_URL}`);
   console.log(`   Shop registration QR: ${BASE_URL}/shop-qr.png`);
   console.log(`   Barista console:      ${BASE_URL}/barista.html`);
 });
+
+// Graceful shutdown: Fly sends SIGTERM before stopping a machine. Close the
+// HTTP server (drain in-flight requests) and then close the SQLite handle
+// so the WAL is checkpointed cleanly and the DB file is never left mid-write.
+function shutdown(signal) {
+  console.log(`\n${signal} received, shutting down…`);
+  server.close(() => {
+    try {
+      require('./db').db.close();
+    } catch (e) {
+      console.error('DB close error:', e.message);
+    }
+    process.exit(0);
+  });
+  // Hard-exit backstop if something hangs.
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

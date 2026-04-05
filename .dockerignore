@@ -1,0 +1,11 @@
+node_modules
+data
+certs
+.env
+.env.*
+!.env.example
+*.log
+.git
+.gitignore
+.github
+README.md
