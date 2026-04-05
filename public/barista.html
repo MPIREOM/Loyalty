@@ -12,18 +12,34 @@
     <div class="logo">☕</div>
     <h1 id="shop-name">Barista Console</h1>
 
-    <!-- Login -->
-    <div class="card" id="login-card">
+    <!-- Step 1: enter phone -->
+    <div class="card" id="phone-card">
       <h2 style="margin-top:0">Staff login</h2>
-      <label for="pin">Enter PIN</label>
-      <input id="pin" type="password" inputmode="numeric" autocomplete="off" />
-      <div id="login-msg"></div>
-      <button id="login-btn">Unlock</button>
+      <p>Enter your registered mobile number. We'll send you a one-time code.</p>
+      <label for="phone">Mobile number</label>
+      <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="9XXX XXXX" />
+      <div id="phone-msg"></div>
+      <button id="phone-btn">Send code</button>
+    </div>
+
+    <!-- Step 2: enter code -->
+    <div class="card" id="code-card" style="display:none">
+      <h2 style="margin-top:0">Enter code</h2>
+      <p id="code-hint">We sent a 6-digit code to your phone.</p>
+      <label for="code">6-digit code</label>
+      <input id="code" type="tel" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" />
+      <div id="code-msg"></div>
+      <button id="code-btn">Verify &amp; continue</button>
+      <button id="code-back" class="secondary">Use a different number</button>
     </div>
 
     <!-- Scanner -->
     <div class="card" id="scanner-card" style="display:none">
-      <h2 style="margin-top:0">Scan customer QR</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">Scan customer QR</h2>
+        <a href="#" id="logout" class="subtle" style="color:var(--accent)">Sign out</a>
+      </div>
+      <p class="subtle" id="welcome" style="margin-top:0"></p>
       <div id="reader"></div>
       <div id="scan-msg"></div>
     </div>
@@ -41,42 +57,111 @@
   </div>
 
   <script>
-    let baristaToken = sessionStorage.getItem('baristaToken') || null;
+    // Long-lived token lives in localStorage so the barista stays signed in
+    // on their personal device for 30 days.
+    let baristaToken = localStorage.getItem('baristaToken') || null;
+    let baristaName  = localStorage.getItem('baristaName')  || null;
     let scanner = null;
     let currentToken = null;
-    let required = 6;
+    let pendingPhone = null;
 
     fetch('/api/config').then(r => r.json()).then(cfg => {
       document.getElementById('shop-name').textContent = cfg.shopName + ' — Barista';
-      required = cfg.drinksRequired;
     });
 
     function show(id) {
-      ['login-card','scanner-card','customer-card'].forEach(x => {
+      ['phone-card','code-card','scanner-card','customer-card'].forEach(x => {
         document.getElementById(x).style.display = x === id ? '' : 'none';
       });
     }
 
-    async function login() {
-      const pin = document.getElementById('pin').value;
-      const res = await fetch('/api/barista/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        document.getElementById('login-msg').innerHTML = `<div class="msg error">${data.error || 'Login failed'}</div>`;
-        return;
+    // ----- Step 1: request code -----
+    async function requestCode() {
+      const phone = document.getElementById('phone').value.trim();
+      if (!phone) return;
+      const btn = document.getElementById('phone-btn');
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/barista/request-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          document.getElementById('phone-msg').innerHTML =
+            `<div class="msg error">${data.error || 'Could not send code.'}</div>`;
+          return;
+        }
+        pendingPhone = phone;
+        document.getElementById('code-hint').textContent =
+          `Hi ${data.name}, we sent a 6-digit code to your phone.`;
+        show('code-card');
+        document.getElementById('code').focus();
+      } catch {
+        document.getElementById('phone-msg').innerHTML =
+          '<div class="msg error">Network error. Try again.</div>';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Send code';
       }
-      baristaToken = data.token;
-      sessionStorage.setItem('baristaToken', baristaToken);
-      startScanner();
     }
 
-    document.getElementById('login-btn').addEventListener('click', login);
-    document.getElementById('pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+    // ----- Step 2: verify code -----
+    async function verifyCode() {
+      const code = document.getElementById('code').value.trim();
+      if (code.length !== 6) {
+        document.getElementById('code-msg').innerHTML =
+          '<div class="msg error">Please enter all 6 digits.</div>';
+        return;
+      }
+      const btn = document.getElementById('code-btn');
+      btn.disabled = true; btn.textContent = 'Verifying…';
+      try {
+        const res = await fetch('/api/barista/verify-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: pendingPhone, code }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          document.getElementById('code-msg').innerHTML =
+            `<div class="msg error">${data.error || 'Verification failed.'}</div>`;
+          return;
+        }
+        baristaToken = data.token;
+        baristaName  = data.name;
+        localStorage.setItem('baristaToken', baristaToken);
+        localStorage.setItem('baristaName',  baristaName);
+        startScanner();
+      } catch {
+        document.getElementById('code-msg').innerHTML =
+          '<div class="msg error">Network error. Try again.</div>';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Verify & continue';
+      }
+    }
 
+    document.getElementById('phone-btn').addEventListener('click', requestCode);
+    document.getElementById('phone').addEventListener('keydown', e => { if (e.key === 'Enter') requestCode(); });
+    document.getElementById('code-btn').addEventListener('click', verifyCode);
+    document.getElementById('code').addEventListener('keydown', e => { if (e.key === 'Enter') verifyCode(); });
+    document.getElementById('code-back').addEventListener('click', () => {
+      pendingPhone = null;
+      document.getElementById('code').value = '';
+      document.getElementById('code-msg').innerHTML = '';
+      show('phone-card');
+    });
+
+    document.getElementById('logout').addEventListener('click', (e) => {
+      e.preventDefault();
+      localStorage.removeItem('baristaToken');
+      localStorage.removeItem('baristaName');
+      baristaToken = null; baristaName = null;
+      if (scanner) { try { scanner.stop(); } catch {} }
+      show('phone-card');
+    });
+
+    // ----- customer rendering + scanning -----
     function renderCustomer(data) {
       document.getElementById('c-name').textContent = data.customer.name;
       document.getElementById('c-phone').textContent = data.customer.phone || '';
@@ -99,6 +184,7 @@
 
     async function startScanner() {
       show('scanner-card');
+      document.getElementById('welcome').textContent = baristaName ? `Signed in as ${baristaName}` : '';
       if (scanner) { try { await scanner.clear(); } catch {} }
       scanner = new Html5Qrcode('reader');
       try {
@@ -111,9 +197,9 @@
           },
           () => {}
         );
-      } catch (e) {
+      } catch {
         document.getElementById('scan-msg').innerHTML =
-          '<div class="msg error">Unable to access camera. Please grant permission.</div>';
+          '<div class="msg error">Unable to access camera. Please grant permission (HTTPS required).</div>';
       }
     }
 
@@ -121,16 +207,14 @@
       currentToken = token;
       const res = await fetch('/api/barista/scan', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + baristaToken,
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + baristaToken },
         body: JSON.stringify({ token }),
       });
       if (res.status === 401) {
-        sessionStorage.removeItem('baristaToken');
-        baristaToken = null;
-        show('login-card');
+        localStorage.removeItem('baristaToken');
+        localStorage.removeItem('baristaName');
+        baristaToken = null; baristaName = null;
+        show('phone-card');
         return;
       }
       const data = await res.json();
@@ -147,10 +231,7 @@
     document.getElementById('add-btn').addEventListener('click', async () => {
       const res = await fetch('/api/barista/purchase', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + baristaToken,
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + baristaToken },
         body: JSON.stringify({ token: currentToken }),
       });
       const data = await res.json();

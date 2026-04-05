@@ -4,7 +4,7 @@ A lightweight, self-contained loyalty system for a coffee shop.
 
 - Customers scan a **shop QR code** on the counter → register with name + Omani mobile number (`+968 7/9XXXXXXX`).
 - They get a personal loyalty card with a QR code they show on every visit.
-- The **barista** opens the barista console on a phone/tablet, scans the customer's QR, and taps **+ Add drink**.
+- The **barista** logs in with their own mobile number (whitelisted by the owner once), receives a 6-digit code, then scans each customer's QR and taps **+ Add drink**. Their device stays signed in for 30 days.
 - After **6 paid drinks**, the 7th is automatically awarded as **free** and the stamp card resets.
 - Optional **Apple Wallet** (`.pkpass`) and **Google Wallet** "Save to Wallet" links so the card lives in the customer's phone.
 
@@ -25,7 +25,7 @@ Open:
 
 - `http://localhost:3000/register.html` — customer registration (this is what the shop QR points to).
 - `http://localhost:3000/card.html#<token>` — customer's personal card (the registration flow redirects here automatically).
-- `http://localhost:3000/barista.html` — staff scanner. Login with `BARISTA_PIN`.
+- `http://localhost:3000/barista.html` — staff scanner. Each barista signs in with their own mobile number (whitelisted via `BARISTA_PHONES`) and a one-time code.
 - `http://localhost:3000/shop-qr.png` — a printable PNG of your shop QR. Print it, laminate it, put it on the counter.
 
 ## How the flow works
@@ -34,8 +34,35 @@ Open:
 2. A customer scans it with their phone camera → registration page opens.
 3. They enter name + Omani mobile number → the server creates a `customer` row and issues a long-lived signed JWT (10 years).
 4. The browser redirects to `/card.html#<token>`. The token is in the URL **fragment** so it is never sent to logs or proxies. Tell the customer to bookmark the page or add it to Apple/Google Wallet.
-5. At the counter, the barista opens `/barista.html` on their device, enters the staff PIN once per 12 hours, then scans the customer's QR.
-6. Tapping **+ Add drink** calls `/api/barista/purchase`. The backend records a paid drink; if the counter reaches `DRINKS_REQUIRED` (default 6), it also inserts a `free` row and resets the stamp card.
+5. At the counter, the barista opens `/barista.html` on their own phone, enters their mobile number, receives a 6-digit OTP, and is signed in for 30 days.
+6. They scan the customer's QR and tap **+ Add drink**. The backend records a paid drink attributed to that barista; if the counter reaches `DRINKS_REQUIRED` (default 6), it also inserts a `free` row and resets the stamp card.
+
+## Barista accounts
+
+You (the owner) don't issue PINs or manage accounts. Just put the staff phone numbers in `.env`:
+
+```
+BARISTA_PHONES=+96891234567:Ahmed,+96899887766:Sara
+```
+
+On every server start, the list is upserted — so to add someone new, append them and restart. Numbers are matched against the Omani format (same validation as customers). Everything after the colon is the display name, attached to each purchase for your records.
+
+### OTP delivery
+
+When a barista taps **Send code**, the server generates a 6-digit code (valid 5 min, max 5 attempts) and calls `sms.js` to deliver it.
+
+- **No config** → the code is printed to the server console. Perfect for your very first setup: read the log, tell the barista the code once, they log in, and their device is remembered for 30 days.
+- **`SMS_WEBHOOK_URL` set** → the server POSTs `{phone, message}` as JSON (with an optional `Authorization: Bearer $SMS_WEBHOOK_SECRET` header) to any provider you like — Twilio, MessageBird, a WhatsApp Business API bot, or an in-house SMS gateway. No provider lock-in.
+
+Example minimal webhook that forwards to Twilio:
+
+```js
+app.post('/sms', async (req, res) => {
+  const { phone, message } = req.body;
+  await twilio.messages.create({ from: TWILIO_NUMBER, to: phone, body: message });
+  res.sendStatus(200);
+});
+```
 
 ## Omani phone number validation
 
@@ -51,9 +78,9 @@ Only mobile prefixes (`7` and `9`) are allowed.
 ## Security model
 
 - **Customer token**: JWT signed with `JWT_SECRET`, embedded in QR code. Anyone with the token can view that customer's card — this is intentional so baristas can scan it. It cannot be used to make purchases (only the barista endpoints can, and those require staff auth).
-- **Barista auth**: PIN-based. Successful login returns a 12h JWT that the browser keeps in `sessionStorage`. Rate-limited (10 attempts / 15 min). Use a non-trivial PIN in production.
-- **Rate limits**: Registration is capped at 20 req/hour per IP.
-- **Data stored**: only `name`, `phone`, and purchase timestamps. No payment info, no location, no tracking.
+- **Barista auth**: phone + OTP. Only numbers in `BARISTA_PHONES` can request a code. Codes are 6 digits, SHA-256 hashed at rest, expire in 5 minutes, and lock after 5 wrong attempts. Successful verification returns a 30-day JWT bound to the barista's id; every protected request re-checks the barista is still active (so removing a staff member from `BARISTA_PHONES` + setting `active=0` in the DB revokes them immediately).
+- **Rate limits**: registration 20/hr per IP, OTP requests 10/15min, OTP verifications 20/15min.
+- **Data stored**: only `name`, `phone`, barista display names, and purchase timestamps. No payment info, no location, no tracking.
 
 ## Apple Wallet setup (optional)
 
@@ -90,6 +117,7 @@ The card page will then show a **Save to Google Wallet** button which hits `/api
 .
 ├── server.js              # Express app — all routes
 ├── db.js                  # SQLite schema + data access
+├── sms.js                 # OTP delivery: console or webhook
 ├── wallet/
 │   ├── apple.js           # .pkpass generation (passkit-generator)
 │   └── google.js          # Google Wallet save-link JWT
@@ -113,7 +141,8 @@ The card page will then show a **Save to Google Wallet** button which hits `/api
 | `GET` | `/api/card/:token` | token | Customer details + stats + recent purchases |
 | `GET` | `/api/qr/:token` | token | PNG of the customer's QR |
 | `GET` | `/shop-qr.png` | — | PNG of the shop registration QR |
-| `POST` | `/api/barista/login` | — | `{pin}` → `{token}` |
+| `POST` | `/api/barista/request-code` | — | `{phone}` → sends OTP to whitelisted staff phone |
+| `POST` | `/api/barista/verify-code` | — | `{phone, code}` → `{token, name}` (30-day JWT) |
 | `POST` | `/api/barista/scan` | barista | `{token}` → customer preview |
 | `POST` | `/api/barista/purchase` | barista | `{token}` → records a drink, awards free when due |
 | `GET` | `/api/wallet/apple/:token` | token | `.pkpass` download |

@@ -27,6 +27,21 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_purchases_customer ON purchases(customer_id);
+
+  CREATE TABLE IF NOT EXISTS baristas (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL UNIQUE,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS barista_otps (
+    phone TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+  );
 `);
 
 const DRINKS_REQUIRED = parseInt(process.env.DRINKS_REQUIRED || '6', 10);
@@ -107,6 +122,72 @@ function getRecentPurchases(customerId, limit = 10) {
     .all(customerId, limit);
 }
 
+// ---------- baristas ----------
+
+const crypto = require('crypto');
+
+function hashCode(code) {
+  return crypto.createHash('sha256').update(String(code)).digest('hex');
+}
+
+function upsertBarista({ name, phone }) {
+  const existing = db.prepare('SELECT * FROM baristas WHERE phone = ?').get(phone);
+  if (existing) {
+    db.prepare('UPDATE baristas SET name = ?, active = 1 WHERE phone = ?').run(name, phone);
+    return db.prepare('SELECT * FROM baristas WHERE phone = ?').get(phone);
+  }
+  const id = crypto.randomUUID();
+  db.prepare(
+    'INSERT INTO baristas (id, name, phone, active, created_at) VALUES (?, ?, ?, 1, ?)'
+  ).run(id, name, phone, Date.now());
+  return db.prepare('SELECT * FROM baristas WHERE id = ?').get(id);
+}
+
+function getBaristaByPhone(phone) {
+  return db.prepare('SELECT * FROM baristas WHERE phone = ? AND active = 1').get(phone);
+}
+
+function getBaristaById(id) {
+  return db.prepare('SELECT * FROM baristas WHERE id = ? AND active = 1').get(id);
+}
+
+function listBaristas() {
+  return db.prepare('SELECT id, name, phone, active FROM baristas ORDER BY created_at').all();
+}
+
+function saveOtp(phone, code, ttlMs) {
+  const expires = Date.now() + ttlMs;
+  db.prepare(
+    `INSERT INTO barista_otps (phone, code_hash, expires_at, attempts)
+     VALUES (?, ?, ?, 0)
+     ON CONFLICT(phone) DO UPDATE SET code_hash = excluded.code_hash,
+                                      expires_at = excluded.expires_at,
+                                      attempts = 0`
+  ).run(phone, hashCode(code), expires);
+}
+
+function consumeOtp(phone, code) {
+  const row = db.prepare('SELECT * FROM barista_otps WHERE phone = ?').get(phone);
+  if (!row) return { ok: false, reason: 'no_code' };
+  if (row.attempts >= 5) {
+    db.prepare('DELETE FROM barista_otps WHERE phone = ?').run(phone);
+    return { ok: false, reason: 'too_many_attempts' };
+  }
+  if (row.expires_at < Date.now()) {
+    db.prepare('DELETE FROM barista_otps WHERE phone = ?').run(phone);
+    return { ok: false, reason: 'expired' };
+  }
+  const expected = hashCode(code);
+  const a = Buffer.from(expected);
+  const b = Buffer.from(row.code_hash);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    db.prepare('UPDATE barista_otps SET attempts = attempts + 1 WHERE phone = ?').run(phone);
+    return { ok: false, reason: 'wrong_code' };
+  }
+  db.prepare('DELETE FROM barista_otps WHERE phone = ?').run(phone);
+  return { ok: true };
+}
+
 module.exports = {
   db,
   createCustomer,
@@ -116,4 +197,10 @@ module.exports = {
   getStats,
   getRecentPurchases,
   DRINKS_REQUIRED,
+  upsertBarista,
+  getBaristaByPhone,
+  getBaristaById,
+  listBaristas,
+  saveOtp,
+  consumeOtp,
 };

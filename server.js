@@ -15,16 +15,43 @@ const {
   getStats,
   getRecentPurchases,
   DRINKS_REQUIRED,
+  upsertBarista,
+  getBaristaByPhone,
+  getBaristaById,
+  listBaristas,
+  saveOtp,
+  consumeOtp,
 } = require('./db');
 
 const apple = require('./wallet/apple');
 const google = require('./wallet/google');
+const { sendSms } = require('./sms');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret';
-const BARISTA_PIN = process.env.BARISTA_PIN || '1234';
 const SHOP_NAME = process.env.SHOP_NAME || 'Coffee Shop';
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Seed baristas from env var: BARISTA_PHONES="+96891234567:Ahmed,+96899887766:Sara"
+(function seedBaristas() {
+  const raw = process.env.BARISTA_PHONES || '';
+  if (!raw.trim()) return;
+  for (const entry of raw.split(',')) {
+    const [phoneRaw, ...nameParts] = entry.split(':');
+    const phone = normalizeOmaniPhone((phoneRaw || '').trim());
+    const name = nameParts.join(':').trim() || 'Barista';
+    if (!phone) {
+      console.warn(`Skipping invalid BARISTA_PHONES entry: ${entry}`);
+      continue;
+    }
+    upsertBarista({ phone, name });
+  }
+  const all = listBaristas();
+  if (all.length) {
+    console.log(`👥 Registered baristas: ${all.map(b => `${b.name} (${b.phone})`).join(', ')}`);
+  }
+})();
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -60,8 +87,12 @@ function verifyCustomerToken(token) {
   }
 }
 
-function signBaristaToken() {
-  return jwt.sign({ kind: 'barista' }, JWT_SECRET, { expiresIn: '12h' });
+function signBaristaToken(barista) {
+  return jwt.sign(
+    { kind: 'barista', sub: barista.id, name: barista.name },
+    JWT_SECRET,
+    { expiresIn: '30d' }
+  );
 }
 
 function requireBarista(req, res, next) {
@@ -71,6 +102,9 @@ function requireBarista(req, res, next) {
   try {
     const p = jwt.verify(token, JWT_SECRET);
     if (p.kind !== 'barista') throw new Error();
+    const row = getBaristaById(p.sub);
+    if (!row) return res.status(401).json({ error: 'unauthorized' });
+    req.barista = { id: row.id, name: row.name };
     next();
   } catch {
     res.status(401).json({ error: 'unauthorized' });
@@ -181,16 +215,48 @@ app.get('/api/wallet/google/:token', (req, res) => {
 
 // ---------- barista routes ----------
 
-const pinLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
-app.post('/api/barista/login', pinLimiter, (req, res) => {
-  const pin = String(req.body.pin || '');
-  // Constant-time compare to avoid timing attacks on the PIN.
-  const a = Buffer.from(pin.padEnd(16, '\0'));
-  const b = Buffer.from(String(BARISTA_PIN).padEnd(16, '\0'));
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: 'Invalid PIN' });
+const otpRequestLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
+const otpVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
+
+app.post('/api/barista/request-code', otpRequestLimiter, async (req, res) => {
+  const phone = normalizeOmaniPhone(req.body.phone);
+  if (!phone) {
+    return res.status(400).json({ error: 'Please enter a valid Omani mobile number.' });
   }
-  res.json({ token: signBaristaToken() });
+  const barista = getBaristaByPhone(phone);
+  if (!barista) {
+    return res
+      .status(403)
+      .json({ error: 'This number is not registered as staff. Ask the owner to add it.' });
+  }
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  saveOtp(phone, code, OTP_TTL_MS);
+  await sendSms(
+    phone,
+    `${SHOP_NAME}: your staff login code is ${code}. It expires in 5 minutes.`
+  );
+  res.json({ sent: true, name: barista.name });
+});
+
+app.post('/api/barista/verify-code', otpVerifyLimiter, (req, res) => {
+  const phone = normalizeOmaniPhone(req.body.phone);
+  const code = String(req.body.code || '').replace(/\D/g, '');
+  if (!phone || code.length !== 6) {
+    return res.status(400).json({ error: 'Invalid phone or code.' });
+  }
+  const barista = getBaristaByPhone(phone);
+  if (!barista) return res.status(403).json({ error: 'Not authorized.' });
+  const result = consumeOtp(phone, code);
+  if (!result.ok) {
+    const map = {
+      no_code: 'Please request a code first.',
+      expired: 'Code expired. Please request a new one.',
+      wrong_code: 'Incorrect code.',
+      too_many_attempts: 'Too many attempts. Please request a new code.',
+    };
+    return res.status(401).json({ error: map[result.reason] || 'Verification failed.' });
+  }
+  res.json({ token: signBaristaToken(barista), name: barista.name });
 });
 
 app.post('/api/barista/scan', requireBarista, (req, res) => {
@@ -211,9 +277,10 @@ app.post('/api/barista/purchase', requireBarista, (req, res) => {
   if (!id) return res.status(404).json({ error: 'Invalid customer QR' });
   const customer = getCustomer(id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  const result = addPurchase(id, req.body.barista || null);
+  const result = addPurchase(id, req.barista.name);
   res.json({
     customer: { id: customer.id, name: customer.name },
+    barista: req.barista.name,
     ...result,
   });
 });
