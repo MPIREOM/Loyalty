@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Join — Coffee Loyalty</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">☕</div>
+    <h1 id="shop-name">Coffee Loyalty</h1>
+    <p>Buy <b id="drinks-required">6</b> drinks, get the next one <b>free</b>. Register once — then just show your QR at the counter.</p>
+
+    <div class="card">
+      <form id="form">
+        <label for="name">Full name</label>
+        <input id="name" name="name" type="text" autocomplete="name" required minlength="2" maxlength="60" placeholder="Your name" />
+
+        <label for="phone">Omani mobile number</label>
+        <input id="phone" name="phone" type="tel" autocomplete="tel" required placeholder="9XXX XXXX" inputmode="tel" />
+
+        <div id="msg"></div>
+        <button type="submit" id="submit">Create my card</button>
+      </form>
+    </div>
+
+    <p class="subtle">By registering you agree to receive loyalty updates. We only store your name and phone number.</p>
+  </div>
+
+  <script>
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+      document.getElementById('shop-name').textContent = cfg.shopName + ' Loyalty';
+      document.getElementById('drinks-required').textContent = cfg.drinksRequired;
+      document.title = 'Join — ' + cfg.shopName;
+    });
+
+    const form = document.getElementById('form');
+    const msg = document.getElementById('msg');
+    const btn = document.getElementById('submit');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msg.innerHTML = '';
+      btn.disabled = true;
+      btn.textContent = 'Creating…';
+      try {
+        const res = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: document.getElementById('name').value,
+            phone: document.getElementById('phone').value,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          msg.innerHTML = `<div class="msg error">${data.error || 'Something went wrong.'}</div>`;
+          btn.disabled = false;
+          btn.textContent = 'Create my card';
+          return;
+        }
+        location.href = '/card.html#' + data.token;
+      } catch (err) {
+        msg.innerHTML = '<div class="msg error">Network error. Please try again.</div>';
+        btn.disabled = false;
+        btn.textContent = 'Create my card';
+      }
+    });
+  </script>
+</body>
+</html>

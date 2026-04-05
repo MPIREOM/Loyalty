@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>My Loyalty Card</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">☕</div>
+    <h1 id="shop-name">Loyalty Card</h1>
+
+    <div class="card" id="card-box">
+      <div class="big-name" id="name">—</div>
+      <div class="subtle" id="phone">—</div>
+
+      <div class="stamps" id="stamps"></div>
+
+      <div id="progress-line" class="subtle" style="text-align:center;margin-bottom:8px;"></div>
+
+      <div class="qr-box">
+        <img id="qr" alt="Your loyalty QR" />
+      </div>
+      <p class="subtle" style="text-align:center;margin:4px 0 0">Show this QR to the barista at each visit.</p>
+    </div>
+
+    <div class="card" id="wallet-card" style="display:none">
+      <h2 style="margin-top:0">Add to your phone</h2>
+      <p>Save your card so it's always one tap away.</p>
+      <div class="wallet-btns">
+        <a id="apple-btn" href="#" style="display:none">  Add to Apple Wallet</a>
+        <a id="google-btn" href="#" target="_blank" rel="noopener" style="display:none">Save to Google Wallet</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Recent activity</h2>
+      <div id="recent"></div>
+    </div>
+
+    <p class="subtle" style="text-align:center">
+      <a href="#" id="save-link" style="color:var(--accent)">Bookmark this page</a> so you can come back anytime.
+    </p>
+  </div>
+
+  <script>
+    const token = location.hash.slice(1);
+    if (!token) location.href = '/register.html';
+
+    document.getElementById('save-link').href = location.href;
+
+    async function load() {
+      const [cfgRes, cardRes] = await Promise.all([
+        fetch('/api/config'),
+        fetch('/api/card/' + encodeURIComponent(token)),
+      ]);
+      if (!cardRes.ok) {
+        document.body.innerHTML = '<div class="wrap"><div class="card"><p>Card not found. Please <a href="/register.html" style="color:var(--accent)">register again</a>.</p></div></div>';
+        return;
+      }
+      const cfg = await cfgRes.json();
+      const data = await cardRes.json();
+
+      document.getElementById('shop-name').textContent = cfg.shopName;
+      document.title = cfg.shopName + ' — ' + data.customer.name;
+      document.getElementById('name').textContent = data.customer.name;
+      document.getElementById('phone').textContent = data.customer.phone;
+
+      // stamps
+      const stampsEl = document.getElementById('stamps');
+      stampsEl.innerHTML = '';
+      stampsEl.style.gridTemplateColumns = `repeat(${Math.min(6, data.stats.required)}, 1fr)`;
+      for (let i = 0; i < data.stats.required; i++) {
+        const d = document.createElement('div');
+        d.className = 'stamp' + (i < data.stats.progress ? ' filled' : '');
+        d.textContent = i < data.stats.progress ? '☕' : (i + 1);
+        stampsEl.appendChild(d);
+      }
+
+      const p = document.getElementById('progress-line');
+      if (data.stats.remaining === 0) {
+        p.innerHTML = '<span style="color:var(--good);font-weight:600">🎉 Free drink ready on your next visit!</span>';
+      } else {
+        p.textContent = `${data.stats.remaining} more to go — total free drinks earned: ${data.stats.totalFree}`;
+      }
+
+      document.getElementById('qr').src = '/api/qr/' + encodeURIComponent(token);
+
+      // wallet
+      if (cfg.wallet.apple || cfg.wallet.google) {
+        document.getElementById('wallet-card').style.display = '';
+        if (cfg.wallet.apple) {
+          const a = document.getElementById('apple-btn');
+          a.href = '/api/wallet/apple/' + encodeURIComponent(token);
+          a.style.display = '';
+        }
+        if (cfg.wallet.google) {
+          const g = document.getElementById('google-btn');
+          g.style.display = '';
+          g.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const res = await fetch('/api/wallet/google/' + encodeURIComponent(token));
+            const j = await res.json();
+            if (j.url) window.open(j.url, '_blank');
+          });
+        }
+      }
+
+      // recent
+      const recentEl = document.getElementById('recent');
+      if (!data.recent.length) {
+        recentEl.innerHTML = '<p class="subtle">No purchases yet. Enjoy your first drink soon!</p>';
+      } else {
+        recentEl.innerHTML = data.recent.map(r => {
+          const d = new Date(r.created_at);
+          const when = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+          const label = r.type === 'free' ? '🎁 Free drink' : '☕ Drink';
+          return `<div class="stat"><span class="label">${when}</span><span class="value">${label}</span></div>`;
+        }).join('');
+      }
+    }
+    load();
+
+    // Auto-refresh every 30s so the card updates after the barista scans.
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>

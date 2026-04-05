@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Barista Console</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">☕</div>
+    <h1 id="shop-name">Barista Console</h1>
+
+    <!-- Login -->
+    <div class="card" id="login-card">
+      <h2 style="margin-top:0">Staff login</h2>
+      <label for="pin">Enter PIN</label>
+      <input id="pin" type="password" inputmode="numeric" autocomplete="off" />
+      <div id="login-msg"></div>
+      <button id="login-btn">Unlock</button>
+    </div>
+
+    <!-- Scanner -->
+    <div class="card" id="scanner-card" style="display:none">
+      <h2 style="margin-top:0">Scan customer QR</h2>
+      <div id="reader"></div>
+      <div id="scan-msg"></div>
+    </div>
+
+    <!-- Customer detail -->
+    <div class="card" id="customer-card" style="display:none">
+      <div class="big-name" id="c-name">—</div>
+      <div class="subtle" id="c-phone">—</div>
+      <div class="stamps" id="c-stamps"></div>
+      <div id="c-progress" class="subtle" style="text-align:center;margin-bottom:8px"></div>
+      <button id="add-btn">+ Add drink</button>
+      <button id="back-btn" class="secondary">Scan another</button>
+      <div id="action-msg"></div>
+    </div>
+  </div>
+
+  <script>
+    let baristaToken = sessionStorage.getItem('baristaToken') || null;
+    let scanner = null;
+    let currentToken = null;
+    let required = 6;
+
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+      document.getElementById('shop-name').textContent = cfg.shopName + ' — Barista';
+      required = cfg.drinksRequired;
+    });
+
+    function show(id) {
+      ['login-card','scanner-card','customer-card'].forEach(x => {
+        document.getElementById(x).style.display = x === id ? '' : 'none';
+      });
+    }
+
+    async function login() {
+      const pin = document.getElementById('pin').value;
+      const res = await fetch('/api/barista/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        document.getElementById('login-msg').innerHTML = `<div class="msg error">${data.error || 'Login failed'}</div>`;
+        return;
+      }
+      baristaToken = data.token;
+      sessionStorage.setItem('baristaToken', baristaToken);
+      startScanner();
+    }
+
+    document.getElementById('login-btn').addEventListener('click', login);
+    document.getElementById('pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+
+    function renderCustomer(data) {
+      document.getElementById('c-name').textContent = data.customer.name;
+      document.getElementById('c-phone').textContent = data.customer.phone || '';
+      const el = document.getElementById('c-stamps');
+      el.innerHTML = '';
+      el.style.gridTemplateColumns = `repeat(${Math.min(6, data.stats.required)}, 1fr)`;
+      for (let i = 0; i < data.stats.required; i++) {
+        const d = document.createElement('div');
+        d.className = 'stamp' + (i < data.stats.progress ? ' filled' : '');
+        d.textContent = i < data.stats.progress ? '☕' : (i + 1);
+        el.appendChild(d);
+      }
+      const p = document.getElementById('c-progress');
+      if (data.stats.remaining === 0) {
+        p.innerHTML = '<span style="color:var(--good);font-weight:600">Next drink is FREE 🎉</span>';
+      } else {
+        p.textContent = `${data.stats.progress} / ${data.stats.required} — ${data.stats.remaining} to free drink`;
+      }
+    }
+
+    async function startScanner() {
+      show('scanner-card');
+      if (scanner) { try { await scanner.clear(); } catch {} }
+      scanner = new Html5Qrcode('reader');
+      try {
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 260, height: 260 } },
+          async (decoded) => {
+            await scanner.stop();
+            await handleScan(decoded);
+          },
+          () => {}
+        );
+      } catch (e) {
+        document.getElementById('scan-msg').innerHTML =
+          '<div class="msg error">Unable to access camera. Please grant permission.</div>';
+      }
+    }
+
+    async function handleScan(token) {
+      currentToken = token;
+      const res = await fetch('/api/barista/scan', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + baristaToken,
+        },
+        body: JSON.stringify({ token }),
+      });
+      if (res.status === 401) {
+        sessionStorage.removeItem('baristaToken');
+        baristaToken = null;
+        show('login-card');
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        document.getElementById('scan-msg').innerHTML = `<div class="msg error">${data.error || 'Invalid QR'}</div>`;
+        setTimeout(startScanner, 1500);
+        return;
+      }
+      document.getElementById('action-msg').innerHTML = '';
+      renderCustomer(data);
+      show('customer-card');
+    }
+
+    document.getElementById('add-btn').addEventListener('click', async () => {
+      const res = await fetch('/api/barista/purchase', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + baristaToken,
+        },
+        body: JSON.stringify({ token: currentToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        document.getElementById('action-msg').innerHTML = `<div class="msg error">${data.error || 'Error'}</div>`;
+        return;
+      }
+      renderCustomer({ customer: data.customer, stats: data.stats });
+      if (data.freeAwarded) {
+        document.getElementById('action-msg').innerHTML =
+          '<div class="msg success">🎁 Free drink awarded! Card reset.</div>';
+      } else {
+        document.getElementById('action-msg').innerHTML =
+          `<div class="msg success">✓ Drink added. ${data.stats.remaining} to go.</div>`;
+      }
+    });
+
+    document.getElementById('back-btn').addEventListener('click', startScanner);
+
+    if (baristaToken) startScanner();
+  </script>
+</body>
+</html>

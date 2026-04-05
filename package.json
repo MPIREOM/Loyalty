@@ -1,0 +1,22 @@
+{
+  "name": "coffee-loyalty",
+  "version": "1.0.0",
+  "description": "Coffee shop loyalty system: buy 6 drinks, get 1 free. QR-based with Apple/Google Wallet support.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "jsonwebtoken": "^9.0.2",
+    "passkit-generator": "^3.3.1",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
