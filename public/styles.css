@@ -32,9 +32,13 @@ h2 { font-size: 20px; margin: 24px 0 12px; }
 p { color: var(--muted); line-height: 1.5; }
 
 .logo {
-  font-size: 48px;
   text-align: center;
   margin-top: 16px;
+}
+.logo img {
+  max-width: 160px;
+  height: auto;
+  display: inline-block;
 }
 
 .card {

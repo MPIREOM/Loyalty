@@ -8,7 +8,7 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="logo">☕</div>
+    <div class="logo"><img src="/thePeak_logo_color.png" alt="Logo" /></div>
     <h1 id="shop-name">Loyalty Card</h1>
 
     <div class="card" id="card-box">
@@ -74,7 +74,7 @@
       for (let i = 0; i < data.stats.required; i++) {
         const d = document.createElement('div');
         d.className = 'stamp' + (i < data.stats.progress ? ' filled' : '');
-        d.textContent = i < data.stats.progress ? '☕' : (i + 1);
+        d.textContent = '☕';
         stampsEl.appendChild(d);
       }
 
