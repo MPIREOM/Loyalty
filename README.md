@@ -8,7 +8,9 @@ A lightweight, self-contained loyalty system for a coffee shop.
 - After **6 paid drinks**, the 7th is automatically awarded as **free** and the stamp card resets.
 - Optional **Apple Wallet** (`.pkpass`) and **Google Wallet** "Save to Wallet" links so the card lives in the customer's phone.
 
-Built with Node.js + Express + SQLite. No external database, no build step, works on a $5 VPS or a Raspberry Pi.
+Built with Node.js + Express + Node's built-in SQLite (`node:sqlite`). No native compilation, no external database, no build step. Works on a $5 VPS or a Raspberry Pi.
+
+**Requires Node.js 22.5 or newer** (for the built-in `node:sqlite` module). The latest LTS is recommended.
 
 ---
 

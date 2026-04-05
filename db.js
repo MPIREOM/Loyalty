@@ -1,13 +1,17 @@
-const Database = require('better-sqlite3');
+// Uses Node's built-in SQLite (node:sqlite, stable in Node 22.5+/24).
+// No native compilation, no extra install step.
+
+const { DatabaseSync } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(path.join(DATA_DIR, 'loyalty.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = new DatabaseSync(path.join(DATA_DIR, 'loyalty.db'));
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA foreign_keys = ON');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS customers (
@@ -46,11 +50,23 @@ db.exec(`
 
 const DRINKS_REQUIRED = parseInt(process.env.DRINKS_REQUIRED || '6', 10);
 
+// node:sqlite doesn't ship a transaction helper, so we wrap manually.
+function transaction(fn) {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
 function createCustomer({ id, name, phone }) {
-  const stmt = db.prepare(
+  db.prepare(
     'INSERT INTO customers (id, name, phone, created_at) VALUES (?, ?, ?, ?)'
-  );
-  stmt.run(id, name, phone, Date.now());
+  ).run(id, name, phone, Date.now());
   return getCustomer(id);
 }
 
@@ -63,12 +79,11 @@ function getCustomerByPhone(phone) {
 }
 
 function addPurchase(customerId, barista) {
-  // Count paid drinks since last reset (i.e. since the most recent free drink, if any).
   const insert = db.prepare(
     'INSERT INTO purchases (customer_id, type, barista, created_at) VALUES (?, ?, ?, ?)'
   );
 
-  const txn = db.transaction(() => {
+  return transaction(() => {
     insert.run(customerId, 'paid', barista || null, Date.now());
     const stats = getStats(customerId);
     let freeAwarded = false;
@@ -78,32 +93,35 @@ function addPurchase(customerId, barista) {
     }
     return { freeAwarded, stats: getStats(customerId) };
   });
-
-  return txn();
 }
 
 function getStats(customerId) {
-  // progress = paid drinks since the most recent free drink
   const lastFree = db
     .prepare(
       "SELECT created_at FROM purchases WHERE customer_id = ? AND type = 'free' ORDER BY created_at DESC LIMIT 1"
     )
     .get(customerId);
-  const since = lastFree ? lastFree.created_at : 0;
+  const since = lastFree ? Number(lastFree.created_at) : 0;
 
-  const paidSince = db
-    .prepare(
-      "SELECT COUNT(*) as c FROM purchases WHERE customer_id = ? AND type = 'paid' AND created_at > ?"
-    )
-    .get(customerId, since).c;
+  const paidSince = Number(
+    db
+      .prepare(
+        "SELECT COUNT(*) as c FROM purchases WHERE customer_id = ? AND type = 'paid' AND created_at > ?"
+      )
+      .get(customerId, since).c
+  );
 
-  const totalPaid = db
-    .prepare("SELECT COUNT(*) as c FROM purchases WHERE customer_id = ? AND type = 'paid'")
-    .get(customerId).c;
+  const totalPaid = Number(
+    db
+      .prepare("SELECT COUNT(*) as c FROM purchases WHERE customer_id = ? AND type = 'paid'")
+      .get(customerId).c
+  );
 
-  const totalFree = db
-    .prepare("SELECT COUNT(*) as c FROM purchases WHERE customer_id = ? AND type = 'free'")
-    .get(customerId).c;
+  const totalFree = Number(
+    db
+      .prepare("SELECT COUNT(*) as c FROM purchases WHERE customer_id = ? AND type = 'free'")
+      .get(customerId).c
+  );
 
   return {
     progress: paidSince,
@@ -123,8 +141,6 @@ function getRecentPurchases(customerId, limit = 10) {
 }
 
 // ---------- baristas ----------
-
-const crypto = require('crypto');
 
 function hashCode(code) {
   return crypto.createHash('sha256').update(String(code)).digest('hex');
@@ -169,11 +185,11 @@ function saveOtp(phone, code, ttlMs) {
 function consumeOtp(phone, code) {
   const row = db.prepare('SELECT * FROM barista_otps WHERE phone = ?').get(phone);
   if (!row) return { ok: false, reason: 'no_code' };
-  if (row.attempts >= 5) {
+  if (Number(row.attempts) >= 5) {
     db.prepare('DELETE FROM barista_otps WHERE phone = ?').run(phone);
     return { ok: false, reason: 'too_many_attempts' };
   }
-  if (row.expires_at < Date.now()) {
+  if (Number(row.expires_at) < Date.now()) {
     db.prepare('DELETE FROM barista_otps WHERE phone = ?').run(phone);
     return { ok: false, reason: 'expired' };
   }
