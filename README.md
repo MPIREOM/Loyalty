@@ -237,12 +237,59 @@ fly certs add loyalty.thepeak.om --app thepeak-loyalty
 fly secrets set BASE_URL="https://loyalty.thepeak.om" --app thepeak-loyalty
 ```
 
-### Backups
+### Backups — continuous replication with Litestream
 
-The whole business is in one file: `/data/loyalty.db`. Options:
+The whole business is in one file: `/data/loyalty.db`. [Litestream](https://litestream.io) is bundled into the Docker image and, when credentials are set, streams every change to an S3-compatible bucket in near-real-time. If the Fly volume is ever lost (or you want to move to a different host), the entrypoint script automatically restores the latest backup on the next boot.
 
-- Quick manual backup: the `fly ssh console … > file.db` command above.
-- Automated: run [`litestream`](https://litestream.io) as a sidecar to continuously replicate the SQLite file to S3/Backblaze B2. Happy to add this if you want it.
+**It's opt-in**: without `LITESTREAM_BUCKET` in your secrets, the app just runs plain `node server.js`. Adding it is 5 minutes.
+
+Recommended provider: **Backblaze B2** (~$0.005 per GB per month, S3-compatible, no egress fees to Fly). A coffee shop's DB will stay comfortably under 100 MB for years, so your backup bill is effectively zero.
+
+1. Sign up at <https://www.backblaze.com/cloud-storage>.
+2. **Create a Bucket** → name it something like `yourshop-loyalty-backup`, type **Private**. Note the **Endpoint** shown on the bucket details page, e.g. `s3.us-west-002.backblazeb2.com`, and the region extracted from it (e.g. `us-west-002`).
+3. **Application Keys → Add a New Application Key** → scope it to just that bucket, read + write. Save the `keyID` and `applicationKey` — B2 only shows the secret once.
+4. Set the secrets on Fly and redeploy:
+
+```bash
+fly secrets set \
+  LITESTREAM_BUCKET="yourshop-loyalty-backup" \
+  LITESTREAM_ENDPOINT="https://s3.us-west-002.backblazeb2.com" \
+  LITESTREAM_REGION="us-west-002" \
+  LITESTREAM_ACCESS_KEY_ID="<your-keyID>" \
+  LITESTREAM_SECRET_ACCESS_KEY="<your-applicationKey>" \
+  --app thepeak-loyalty
+
+fly deploy --app thepeak-loyalty
+```
+
+In `fly logs` you should now see:
+
+```
+==> Starting Node under litestream continuous replication.
+```
+
+**To verify it's working**, register a test customer, then:
+
+```bash
+fly ssh console --app thepeak-loyalty --command "litestream snapshots -config /etc/litestream.yml /data/loyalty.db"
+```
+
+You should see at least one snapshot.
+
+**Disaster recovery drill** — simulate a volume loss:
+
+```bash
+fly volumes list --app thepeak-loyalty
+fly volumes destroy <vol-id> --app thepeak-loyalty    # ⚠️ deletes the live DB
+fly volumes create loyalty_data --region bom --size 1 --app thepeak-loyalty
+fly deploy --app thepeak-loyalty
+```
+
+On the next boot you'll see `==> No local DB … attempting litestream restore…` in the logs and the app comes back with every customer, stamp, and free drink intact.
+
+**Retention**: the bundled config keeps 14 days of snapshots + WAL history. Tweak `retention:` in `litestream.yml` if you want longer.
+
+**Cloudflare R2 / AWS S3 instead of B2?** Same four secrets, different endpoint + region values. R2 is also a great pick (10 GB free forever, no egress).
 
 ## Deploying elsewhere
 

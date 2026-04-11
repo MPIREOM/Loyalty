@@ -9,3 +9,4 @@ certs
 .gitignore
 .github
 README.md
+fly.toml

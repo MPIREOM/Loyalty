@@ -1,0 +1,26 @@
+# Litestream replication config.
+#
+# This file is read by the litestream process running alongside the Node
+# server. It continuously replicates every change to /data/loyalty.db to
+# an S3-compatible bucket (Backblaze B2, AWS S3, Cloudflare R2, etc.).
+#
+# The ${VAR} placeholders below are filled in from environment variables
+# at runtime — set them as Fly secrets, never commit real credentials.
+#
+# If LITESTREAM_BUCKET is unset, the entrypoint script skips litestream
+# entirely and the app runs without replication.
+dbs:
+  - path: /data/loyalty.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: loyalty
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        # Keep 14 days of snapshots / WAL history. Plenty for a coffee shop
+        # and still well under 100 MB of B2 storage for years.
+        retention: 336h
+        retention-check-interval: 24h
+        sync-interval: 1s
