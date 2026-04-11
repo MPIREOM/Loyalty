@@ -66,9 +66,13 @@
     <div class="card" id="customer-card" style="display:none">
       <div class="big-name" id="c-name">—</div>
       <div class="subtle" id="c-phone">—</div>
+      <div id="c-birthday" style="display:none;padding:12px;background:rgba(125,200,138,0.15);border-radius:10px;margin:12px 0;color:var(--good);text-align:center;font-weight:600;">
+        🎂 It's their birthday today!
+      </div>
       <div class="stamps" id="c-stamps"></div>
       <div id="c-progress" class="subtle" style="text-align:center;margin-bottom:8px"></div>
       <button id="add-btn">+ Add drink</button>
+      <button id="birthday-btn" style="display:none;background:#7dc88a;color:#1a1410;">🎂 Give free birthday drink</button>
       <button id="back-btn" class="secondary">Scan another</button>
       <div id="action-msg"></div>
     </div>
@@ -224,6 +228,22 @@
       } else {
         p.textContent = `${data.stats.progress} / ${data.stats.required} — ${data.stats.remaining} to free drink`;
       }
+
+      // Birthday banner + claim button
+      const bdayCard = document.getElementById('c-birthday');
+      const bdayBtn = document.getElementById('birthday-btn');
+      if (data.stats.isBirthday && data.stats.birthdayClaimable) {
+        bdayCard.style.display = '';
+        bdayCard.textContent = '🎂 It\'s their birthday today!';
+        bdayBtn.style.display = '';
+      } else if (data.stats.isBirthday) {
+        bdayCard.style.display = '';
+        bdayCard.textContent = '🎂 Birthday today — free drink already claimed this year.';
+        bdayBtn.style.display = 'none';
+      } else {
+        bdayCard.style.display = 'none';
+        bdayBtn.style.display = 'none';
+      }
     }
 
     // ----- scanner -----
@@ -371,6 +391,35 @@
     document.getElementById('back-btn').addEventListener('click', () => {
       clearTimeout(window.__autoNext);
       startScanner();
+    });
+
+    // ----- claim birthday drink -----
+    document.getElementById('birthday-btn').addEventListener('click', async () => {
+      if (!currentCustomerId) return;
+      const btn = document.getElementById('birthday-btn');
+      btn.disabled = true;
+      const res = await fetch('/api/barista/birthday-drink', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + baristaToken },
+        body: JSON.stringify({ customerId: currentCustomerId }),
+      });
+      btn.disabled = false;
+      if (res.status === 401) return signOutExpired();
+      const data = await res.json();
+      if (!res.ok) {
+        feedbackError();
+        document.getElementById('action-msg').innerHTML =
+          `<div class="msg error">${data.error || 'Error'}</div>`;
+        return;
+      }
+      feedbackReward();
+      renderCustomer({ customer: data.customer, stats: data.stats });
+      document.getElementById('action-msg').innerHTML =
+        '<div class="msg success">🎂 Free birthday drink given! Have a great day.</div>';
+      clearTimeout(window.__autoNext);
+      window.__autoNext = setTimeout(() => {
+        if (document.getElementById('customer-card').style.display !== 'none') startScanner();
+      }, 3500);
     });
 
     if (baristaToken) startScanner();

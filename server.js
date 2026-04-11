@@ -22,6 +22,13 @@ const {
   saveOtp,
   consumeOtp,
   getOwnerStats,
+  claimBirthdayDrink,
+  recordReferralReward,
+  getInactiveCustomers,
+  getNearRewardCustomers,
+  getAllCustomersForExport,
+  getActiveCampaign,
+  setCampaign,
 } = require('./db');
 
 const apple = require('./wallet/apple');
@@ -150,11 +157,25 @@ app.get('/api/config', (_req, res) => {
   });
 });
 
+// Birthday field is accepted as "MM-DD" (zero-padded, 01-01 .. 12-31).
+function normalizeBirthday(input) {
+  if (typeof input !== 'string') return null;
+  const m = input.trim().match(/^(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const mm = parseInt(m[1], 10);
+  const dd = parseInt(m[2], 10);
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  return `${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+}
+
 // Customer registration
 const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20 });
 app.post('/api/register', registerLimiter, (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const phone = normalizeOmaniPhone(req.body.phone);
+  const birthday = normalizeBirthday(req.body.birthday); // optional
+  const referralCode =
+    typeof req.body.referralCode === 'string' ? req.body.referralCode.trim() : '';
 
   if (name.length < 2 || name.length > 60) {
     return res.status(400).json({ error: 'Please enter a valid name.' });
@@ -169,10 +190,38 @@ app.post('/api/register', registerLimiter, (req, res) => {
     return res.json({ id: existing.id, token, existing: true });
   }
 
+  // Validate referralCode (must map to an existing customer). Silently ignore
+  // an invalid code instead of failing the signup — don't block registration.
+  let referrer = null;
+  if (referralCode) {
+    referrer = getCustomer(referralCode);
+  }
+
   const id = crypto.randomUUID();
-  createCustomer({ id, name, phone });
+  createCustomer({
+    id,
+    name,
+    phone,
+    birthday,
+    referredBy: referrer ? referrer.id : null,
+  });
+
+  // If referred, credit both sides once the new customer is in the DB.
+  if (referrer) {
+    try {
+      recordReferralReward(referrer.id, id);
+    } catch (e) {
+      console.error('Referral reward error:', e.message);
+    }
+  }
+
   const token = signCustomerToken(id);
-  res.json({ id, token, existing: false });
+  res.json({
+    id,
+    token,
+    existing: false,
+    referralApplied: !!referrer,
+  });
 });
 
 // Customer card info (authenticated by the token embedded in their QR/link)
@@ -182,11 +231,24 @@ app.get('/api/card/:token', (req, res) => {
   const customer = getCustomer(id);
   if (!customer) return res.status(404).json({ error: 'not found' });
   res.json({
-    customer: { id: customer.id, name: customer.name, phone: customer.phone },
+    customer: {
+      id: customer.id,
+      name: customer.name,
+      phone: customer.phone,
+      birthday: customer.birthday || null,
+    },
     stats: getStats(id),
     recent: getRecentPurchases(id, 10),
     qrPayload: req.params.token,
+    referralUrl: `${BASE_URL}/register.html?ref=${encodeURIComponent(customer.id)}`,
+    campaign: getActiveCampaign(),
   });
+});
+
+// Public: current campaign banner (no auth). Used by the card auto-refresh
+// so the banner updates without re-requesting the full card payload.
+app.get('/api/config/campaign', (_req, res) => {
+  res.json({ campaign: getActiveCampaign() });
 });
 
 // QR code image for the customer's token
@@ -324,6 +386,29 @@ app.post('/api/barista/purchase', requireStaff, (req, res) => {
   });
 });
 
+// Claim today's birthday free drink for a customer. Idempotent per calendar
+// year — the second attempt on the same day returns 409 so the barista can't
+// accidentally give two birthday drinks.
+app.post('/api/barista/birthday-drink', requireStaff, (req, res) => {
+  const id = resolveCustomerId(req.body);
+  if (!id) return res.status(404).json({ error: 'Invalid customer' });
+  const customer = getCustomer(id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  const result = claimBirthdayDrink(id, req.staff.name);
+  if (!result.ok) {
+    const map = {
+      not_birthday: 'It is not this customer\'s birthday today.',
+      already_claimed: 'Birthday drink already claimed this year.',
+      not_found: 'Customer not found.',
+    };
+    return res.status(409).json({ error: map[result.reason] || 'Unable to claim.' });
+  }
+  res.json({
+    customer: { id: customer.id, name: customer.name },
+    stats: result.stats,
+  });
+});
+
 // Manual phone number lookup — fallback when scanning the QR isn't working
 // (scratched screen, dim phone, awkward angle, customer forgot their card).
 app.post('/api/barista/lookup', requireStaff, (req, res) => {
@@ -345,6 +430,54 @@ app.post('/api/barista/lookup', requireStaff, (req, res) => {
 
 app.get('/api/owner/stats', requireOwner, (_req, res) => {
   res.json(getOwnerStats());
+});
+
+// Customer segments for targeted marketing.
+app.get('/api/owner/segments/inactive', requireOwner, (req, res) => {
+  const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 30));
+  res.json({ days, customers: getInactiveCustomers(days) });
+});
+
+app.get('/api/owner/segments/near-reward', requireOwner, (_req, res) => {
+  res.json({ customers: getNearRewardCustomers() });
+});
+
+// CSV export of the full customer list. Own your data.
+app.get('/api/owner/customers.csv', requireOwner, (_req, res) => {
+  const rows = getAllCustomersForExport();
+  const headers = [
+    'id',
+    'name',
+    'phone',
+    'created_at',
+    'birthday',
+    'referred_by',
+    'total_paid',
+    'total_free',
+    'last_visit',
+  ];
+  const escape = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [headers.join(',')];
+  for (const r of rows) {
+    lines.push(headers.map((h) => escape(r[h])).join(','));
+  }
+  const filename = `customers-${new Date().toISOString().slice(0, 10)}.csv`;
+  res
+    .type('text/csv; charset=utf-8')
+    .set('Content-Disposition', `attachment; filename="${filename}"`)
+    .send(lines.join('\n') + '\n');
+});
+
+// Campaign banner — owner edits, all customer cards see it.
+app.post('/api/owner/campaign', requireOwner, (req, res) => {
+  const title = typeof req.body.title === 'string' ? req.body.title : '';
+  const body = typeof req.body.body === 'string' ? req.body.body : '';
+  const expires_at = req.body.expires_at ? Number(req.body.expires_at) : null;
+  const saved = setCampaign({ title, body, expires_at });
+  res.json({ campaign: saved });
 });
 
 // ---------- PWA manifest ----------

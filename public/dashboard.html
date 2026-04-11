@@ -54,6 +54,61 @@
     }
     .pill.paid { background: rgba(200,150,102,0.2); color: var(--accent-strong); }
     .pill.free { background: rgba(125,200,138,0.2); color: var(--good); }
+    .row-actions { display: flex; gap: 8px; align-items: center; }
+    .row-actions a {
+      display: inline-block;
+      padding: 6px 10px;
+      background: #25D366;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    textarea {
+      width: 100%;
+      min-height: 80px;
+      padding: 12px 14px;
+      background: #1a1410;
+      border: 1px solid #3a2d22;
+      border-radius: 12px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      resize: vertical;
+    }
+    textarea:focus { border-color: var(--accent); }
+    input[type="date"] {
+      width: 100%;
+      padding: 12px 14px;
+      background: #1a1410;
+      border: 1px solid #3a2d22;
+      border-radius: 12px;
+      color: var(--text);
+      font-size: 16px;
+      outline: none;
+    }
+    .seg-tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .seg-tab {
+      padding: 8px 14px;
+      background: #1a1410;
+      border: 1px solid #3a2d22;
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .seg-tab.active { background: var(--accent); color: #1a1410; border-color: var(--accent); }
+    .yday-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .yday-grid .kpi { padding: 12px; }
+    .yday-grid .kpi .num { font-size: 22px; }
+    @media (max-width: 540px) { .yday-grid { grid-template-columns: repeat(2, 1fr); } }
   </style>
 </head>
 <body>
@@ -93,6 +148,55 @@
 
       <h2>Overview</h2>
       <div class="grid" id="kpis"></div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Yesterday</h2>
+        <div class="yday-grid" id="yday"></div>
+      </div>
+
+      <!-- Drink of the week campaign -->
+      <div class="card">
+        <h2 style="margin-top:0">Announcement banner</h2>
+        <p class="subtle">A short message pinned to the top of every customer's card. Use it for "Drink of the week", new launches, shop holidays, etc.</p>
+        <label for="camp-title">Title</label>
+        <input id="camp-title" type="text" maxlength="60" placeholder="e.g. Drink of the week" />
+        <label for="camp-body">Message</label>
+        <textarea id="camp-body" maxlength="280" placeholder="e.g. Try our new Saffron Latte — 20% off all week ☕"></textarea>
+        <label for="camp-expires">Expires on (optional)</label>
+        <input id="camp-expires" type="date" />
+        <div id="camp-msg"></div>
+        <button id="camp-save">Save banner</button>
+        <button id="camp-clear" class="secondary">Clear banner</button>
+      </div>
+
+      <!-- Customer segments / marketing lists -->
+      <div class="card">
+        <h2 style="margin-top:0">Reach your customers</h2>
+        <p class="subtle">Tap the WhatsApp button next to any row to open a pre-filled message. Edit the template below to change what gets sent.</p>
+
+        <div class="seg-tabs">
+          <div class="seg-tab active" data-seg="near-reward">One drink from free</div>
+          <div class="seg-tab" data-seg="inactive-14">Not seen 14 days</div>
+          <div class="seg-tab" data-seg="inactive-30">Not seen 30 days</div>
+          <div class="seg-tab" data-seg="inactive-60">Not seen 60 days</div>
+        </div>
+
+        <label for="seg-template">Message template — use {name} and {shop}</label>
+        <textarea id="seg-template"></textarea>
+
+        <table id="seg-table">
+          <thead><tr><th>Name</th><th>Phone</th><th>Info</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="seg-empty" class="subtle" style="display:none">Nobody in this group right now.</div>
+      </div>
+
+      <!-- CSV export -->
+      <div class="card">
+        <h2 style="margin-top:0">Export customer list</h2>
+        <p class="subtle">Download your full customer database as a CSV file. You own this data — use it for marketing, backups, or moving to any other tool.</p>
+        <button id="csv-btn">⬇ Download customers.csv</button>
+      </div>
 
       <div class="card">
         <h2 style="margin-top:0">Top customers</h2>
@@ -232,6 +336,9 @@
       return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     }
 
+    let shopName = 'The Peak';
+    fetch('/api/config').then(r => r.json()).then(cfg => { shopName = cfg.shopName || 'The Peak'; });
+
     async function loadDashboard() {
       show('dash');
       document.getElementById('welcome').textContent = `Signed in as ${ownerName}`;
@@ -247,9 +354,24 @@
       }
       const data = await res.json();
       renderKpis(data.totals);
+      renderYesterday(data.yesterday);
       renderTop(data.topCustomers);
       renderBaristas(data.perBarista);
       renderActivity(data.recentActivity);
+      loadSegment(currentSeg);
+      loadCampaign();
+    }
+
+    function renderYesterday(y) {
+      if (!y) return;
+      document.getElementById('yday').innerHTML = [
+        ['Drinks', y.drinks],
+        ['Customers', y.uniqueCustomers],
+        ['New signups', y.newCustomers],
+        ['Free drinks', y.freeDrinks],
+      ].map(([lbl, num]) =>
+        `<div class="kpi"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`
+      ).join('');
     }
 
     function renderKpis(t) {
@@ -320,6 +442,151 @@
       localStorage.removeItem('ownerName');
       ownerToken = null; ownerName = null;
       show('phone-card');
+    });
+
+    // ---- segments (win-back + near-reward) ----
+    const DEFAULT_TEMPLATES = {
+      'near-reward':
+        'Hi {name}! ☕ You\'re ONE drink away from a free one at {shop}. Swing by today and claim it!',
+      'inactive-14':
+        'Hi {name}, we miss you at {shop}! ☕ Come in this week and your next drink is on us.',
+      'inactive-30':
+        'Hi {name}! It\'s been a while since we saw you at {shop}. Here\'s a free drink to welcome you back ☕',
+      'inactive-60':
+        'Hi {name}, it\'s been too long! {shop} has a free drink with your name on it — come say hi ☕',
+    };
+    let currentSeg = 'near-reward';
+    const segTpl = document.getElementById('seg-template');
+    const segTabs = document.querySelectorAll('.seg-tab');
+
+    function loadTemplateFor(seg) {
+      const stored = localStorage.getItem('tpl:' + seg);
+      segTpl.value = stored || DEFAULT_TEMPLATES[seg];
+    }
+    segTpl.addEventListener('input', () => {
+      localStorage.setItem('tpl:' + currentSeg, segTpl.value);
+    });
+
+    segTabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        segTabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        currentSeg = tab.dataset.seg;
+        loadTemplateFor(currentSeg);
+        loadSegment(currentSeg);
+      });
+    });
+    loadTemplateFor(currentSeg);
+
+    function whatsappLink(phone, text) {
+      // wa.me requires the number without '+' and without spaces.
+      const cleaned = String(phone || '').replace(/\D/g, '');
+      return 'https://wa.me/' + cleaned + '?text=' + encodeURIComponent(text);
+    }
+
+    function fillTemplate(name) {
+      return segTpl.value.replace(/\{name\}/g, name || 'there').replace(/\{shop\}/g, shopName);
+    }
+
+    async function loadSegment(seg) {
+      const body = document.querySelector('#seg-table tbody');
+      const empty = document.getElementById('seg-empty');
+      const table = document.getElementById('seg-table');
+      body.innerHTML = '';
+      let endpoint, label;
+      if (seg === 'near-reward') {
+        endpoint = '/api/owner/segments/near-reward';
+        label = (r) => `${r.progress}/${r.required} — 1 to free`;
+      } else {
+        const days = parseInt(seg.replace('inactive-', ''), 10);
+        endpoint = '/api/owner/segments/inactive?days=' + days;
+        label = (r) => {
+          const d = Math.floor((Date.now() - Number(r.last_activity_at)) / 86400000);
+          return `${d} days ago`;
+        };
+      }
+      const res = await fetch(endpoint, {
+        headers: { 'Authorization': 'Bearer ' + ownerToken },
+      });
+      if (res.status === 401 || res.status === 403) return;
+      const data = await res.json();
+      const rows = data.customers || [];
+      if (!rows.length) {
+        table.style.display = 'none';
+        empty.style.display = '';
+        return;
+      }
+      table.style.display = '';
+      empty.style.display = 'none';
+      body.innerHTML = rows
+        .map((r) => `
+          <tr>
+            <td>${escapeHtml(r.name)}</td>
+            <td class="subtle">${escapeHtml(r.phone)}</td>
+            <td class="subtle">${escapeHtml(label(r))}</td>
+            <td class="row-actions">
+              <a href="${whatsappLink(r.phone, fillTemplate(r.name))}" target="_blank" rel="noopener">WhatsApp</a>
+            </td>
+          </tr>`)
+        .join('');
+    }
+
+    // ---- campaign banner editor ----
+    async function loadCampaign() {
+      const res = await fetch('/api/config/campaign');
+      const { campaign } = await res.json();
+      if (campaign) {
+        document.getElementById('camp-title').value = campaign.title || '';
+        document.getElementById('camp-body').value = campaign.body || '';
+        document.getElementById('camp-expires').value = campaign.expires_at
+          ? new Date(Number(campaign.expires_at)).toISOString().slice(0, 10)
+          : '';
+      }
+    }
+    async function saveCampaign(clear = false) {
+      const title = clear ? '' : document.getElementById('camp-title').value;
+      const body = clear ? '' : document.getElementById('camp-body').value;
+      const dateStr = clear ? '' : document.getElementById('camp-expires').value;
+      const expires_at = dateStr ? new Date(dateStr + 'T23:59:59').getTime() : null;
+      const res = await fetch('/api/owner/campaign', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + ownerToken,
+        },
+        body: JSON.stringify({ title, body, expires_at }),
+      });
+      const msg = document.getElementById('camp-msg');
+      if (!res.ok) {
+        msg.innerHTML = '<div class="msg error">Could not save.</div>';
+        return;
+      }
+      msg.innerHTML = `<div class="msg success">${clear ? 'Banner cleared.' : 'Banner saved.'}</div>`;
+      if (clear) {
+        document.getElementById('camp-title').value = '';
+        document.getElementById('camp-body').value = '';
+        document.getElementById('camp-expires').value = '';
+      }
+      setTimeout(() => { msg.innerHTML = ''; }, 3000);
+    }
+    document.getElementById('camp-save').addEventListener('click', () => saveCampaign(false));
+    document.getElementById('camp-clear').addEventListener('click', () => saveCampaign(true));
+
+    // ---- CSV export ----
+    document.getElementById('csv-btn').addEventListener('click', async () => {
+      const res = await fetch('/api/owner/customers.csv', {
+        headers: { Authorization: 'Bearer ' + ownerToken },
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'customers-' + new Date().toISOString().slice(0, 10) + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     });
 
     if (ownerToken) loadDashboard();

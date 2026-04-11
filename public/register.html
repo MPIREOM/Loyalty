@@ -19,6 +19,9 @@
     <p>Buy <b id="drinks-required">6</b> drinks, get the next one <b>free</b>. Register once — then just show your QR at the counter.</p>
 
     <div class="card">
+      <div id="ref-banner" style="display:none;padding:12px 14px;background:rgba(125,200,138,0.15);border-radius:10px;margin-bottom:12px;color:var(--good);font-size:14px;">
+        🎁 You were invited! You'll start with a bonus stamp.
+      </div>
       <form id="form">
         <label for="name">Full name</label>
         <input id="name" name="name" type="text" autocomplete="name" required minlength="2" maxlength="60" placeholder="Your name" />
@@ -26,12 +29,15 @@
         <label for="phone">Omani mobile number</label>
         <input id="phone" name="phone" type="tel" autocomplete="tel" required placeholder="9XXX XXXX" inputmode="tel" />
 
+        <label for="birthday">Birthday (optional — free drink every year!) 🎂</label>
+        <input id="birthday" name="birthday" type="text" inputmode="numeric" pattern="\d{2}-\d{2}" placeholder="MM-DD e.g. 07-15" maxlength="5" />
+
         <div id="msg"></div>
         <button type="submit" id="submit">Create my card</button>
       </form>
     </div>
 
-    <p class="subtle">By registering you agree to receive loyalty updates. We only store your name and phone number.</p>
+    <p class="subtle">By registering you agree to receive loyalty updates. We only store your name, phone number, and (optional) birthday.</p>
   </div>
 
   <script>
@@ -39,6 +45,21 @@
       document.getElementById('shop-name').textContent = cfg.shopName + ' Loyalty';
       document.getElementById('drinks-required').textContent = cfg.drinksRequired;
       document.title = 'Join — ' + cfg.shopName;
+    });
+
+    // Referral code from ?ref=<customer_id>
+    const params = new URLSearchParams(location.search);
+    const referralCode = params.get('ref') || '';
+    if (referralCode) {
+      document.getElementById('ref-banner').style.display = '';
+    }
+
+    // Normalize birthday input: auto-insert dash after month
+    const birthdayInput = document.getElementById('birthday');
+    birthdayInput.addEventListener('input', (e) => {
+      let v = e.target.value.replace(/\D/g, '').slice(0, 4);
+      if (v.length >= 3) v = v.slice(0, 2) + '-' + v.slice(2);
+      e.target.value = v;
     });
 
     const form = document.getElementById('form');
@@ -57,6 +78,8 @@
           body: JSON.stringify({
             name: document.getElementById('name').value,
             phone: document.getElementById('phone').value,
+            birthday: birthdayInput.value || undefined,
+            referralCode: referralCode || undefined,
           }),
         });
         const data = await res.json();
