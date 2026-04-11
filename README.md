@@ -291,6 +291,75 @@ On the next boot you'll see `==> No local DB … attempting litestream restore�
 
 **Cloudflare R2 / AWS S3 instead of B2?** Same four secrets, different endpoint + region values. R2 is also a great pick (10 GB free forever, no egress).
 
+## Deploying to Railway (alternative to Fly)
+
+A `railway.json` is included so Railway builds from the same `Dockerfile` used for Fly. Pick Railway if you can't get a payment method working on Fly or you just prefer a GitHub-first deploy flow with no CLI.
+
+**Cost:** Railway's Hobby plan is $5/month and includes $5 of execution credit. A single small service running 24/7 stays comfortably within it.
+
+### The easy path — deploy from GitHub in your browser
+
+No CLI needed. Your repo is already on GitHub, so:
+
+1. Sign up at <https://railway.app> (you'll need to add a payment method — Railway also uses Stripe, so if your debit card was declined on Fly, first try the bank-app fixes listed above).
+2. **New Project → Deploy from GitHub repo → Configure GitHub App** and authorize Railway to read your `mpireom/loyalty` repo.
+3. Pick the repo. Railway sees `railway.json` + `Dockerfile` and starts building automatically.
+4. While it builds, click the service → **Variables** → **Raw Editor** and paste (replace every `<…>`):
+
+   ```
+   NODE_ENV=production
+   PORT=3000
+   DATA_DIR=/data
+   JWT_SECRET=<generate a long random string>
+   SHOP_NAME=The Peak
+   BARISTA_PHONES=+96891234567:YourBarista
+   OWNER_PHONES=+96890000000:YourName
+
+   LITESTREAM_BUCKET=thepeak-loyalty-backup
+   LITESTREAM_ENDPOINT=https://s3.us-east-005.backblazeb2.com
+   LITESTREAM_REGION=us-east-005
+   LITESTREAM_ACCESS_KEY_ID=<bucket-scoped keyID>
+   LITESTREAM_SECRET_ACCESS_KEY=<bucket-scoped applicationKey>
+   ```
+
+   Leave the Litestream block out if you're not using Backblaze yet — the app runs fine without replication.
+
+5. **Settings → Volumes → Add Volume**:
+   - Name: `loyalty_data`
+   - Mount path: `/data` (must match `DATA_DIR` above)
+   - Size: 1 GB
+6. **Settings → Networking → Generate Domain**. Railway gives you a `https://yourshop-loyalty.up.railway.app` URL. Copy it.
+7. Back in **Variables**, add one more:
+   ```
+   BASE_URL=https://yourshop-loyalty.up.railway.app
+   ```
+8. **Deployments → Redeploy** (so it picks up `BASE_URL` for the printable shop QR).
+
+Your server is now live at that Railway URL. Visit `/register.html`, `/barista.html`, `/dashboard.html`, and `/shop-qr.png` exactly as on Fly.
+
+### Custom domain on Railway
+
+**Settings → Networking → Custom Domain** → enter `loyalty.thepeak.om` → Railway shows a CNAME target. Add it at your DNS provider, wait a minute for propagation, then update `BASE_URL` and redeploy.
+
+### Adding baristas later
+
+**Variables** → edit `BARISTA_PHONES` (append the new entry like `+96891234567:Ahmed,+96899887766:Sara`) → save. Railway restarts the service automatically.
+
+### CLI alternative (optional)
+
+If you prefer the CLI:
+
+```powershell
+npm install -g @railway/cli
+railway login
+cd "C:\Users\Windows 11\loyalty"
+railway init          # creates a new project linked to this folder
+railway up            # builds and deploys
+railway variables set JWT_SECRET="..."    # same vars as above
+railway volume add --mount-path /data     # create the persistent volume
+railway domain        # generate a public domain
+```
+
 ## Deploying elsewhere
 
 The `Dockerfile` is generic — it will run on Railway, Render, a VPS (with `docker run -v`), a Raspberry Pi, etc. Key things to remember on any host:
