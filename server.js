@@ -70,6 +70,10 @@ const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 })();
 
 const app = express();
+// Behind a reverse proxy (Fly, Railway, Render, Cloudflare, nginx…). Trust
+// one hop so req.ip reflects the real client and express-rate-limit keys
+// limits per-user instead of per-proxy.
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '64kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
