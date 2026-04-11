@@ -59,6 +59,14 @@
       </div>
     </div>
 
+    <!-- Notifications opt-in -->
+    <div class="card" id="push-card" style="display:none">
+      <h2 style="margin-top:0">🔔 Get notified</h2>
+      <p id="push-hint">We'll ping you when your free drink is ready — and only then. No spam.</p>
+      <button id="push-btn">Enable notifications</button>
+      <div id="push-msg"></div>
+    </div>
+
     <!-- Referral: invite a friend -->
     <div class="card" id="refer-card">
       <h2 style="margin-top:0">🎁 Invite a friend</h2>
@@ -138,6 +146,116 @@
         'Tap <b>Share <span style="font-family:system-ui">⬆</span></b> at the bottom of Safari, ' +
         'then <b>Add to Home Screen</b>. Your card becomes a one-tap icon.';
     }
+
+    // ---- push notifications opt-in ----
+    //
+    // Web Push works on:
+    //   - Android Chrome/Firefox/Edge everywhere
+    //   - Desktop Chrome/Firefox/Edge/Safari
+    //   - iOS Safari 16.4+ BUT only when the PWA is installed to the home
+    //     screen and opened from there (not in a browser tab)
+    //
+    // We register the service worker eagerly on every visit (harmless if
+    // already registered) and show the "Enable notifications" card only when
+    // the browser can actually do it.
+    async function setupPush() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+        return; // old browser — skip silently
+      }
+      try {
+        await navigator.serviceWorker.register('/sw.js');
+      } catch (err) {
+        console.warn('SW registration failed:', err);
+        return;
+      }
+
+      // Check server support: returns 501 if VAPID isn't configured.
+      let serverCfg;
+      try {
+        const r = await fetch('/api/config');
+        serverCfg = await r.json();
+      } catch { return; }
+      if (!serverCfg.push || !serverCfg.push.enabled) return;
+
+      const pushCard = document.getElementById('push-card');
+      const pushBtn  = document.getElementById('push-btn');
+      const pushHint = document.getElementById('push-hint');
+      const pushMsg  = document.getElementById('push-msg');
+
+      // iOS needs the PWA to be installed first.
+      if (isIOS && !isStandalone) {
+        pushCard.style.display = '';
+        pushHint.innerHTML =
+          '📱 To enable notifications on iPhone, first tap <b>Share ⬆</b> → ' +
+          '<b>Add to Home Screen</b>, then open this page from the home-screen icon and come back here.';
+        pushBtn.style.display = 'none';
+        return;
+      }
+
+      // Already granted + already subscribed? Just show confirmation.
+      const reg = await navigator.serviceWorker.ready;
+      const existing = await reg.pushManager.getSubscription();
+      if (Notification.permission === 'granted' && existing) {
+        pushCard.style.display = '';
+        pushHint.textContent = 'You\'ll get a ping when your next free drink is ready. Turn off anytime in your phone\'s notification settings.';
+        pushBtn.textContent = '✓ Notifications on';
+        pushBtn.disabled = true;
+        return;
+      }
+      if (Notification.permission === 'denied') {
+        pushCard.style.display = '';
+        pushHint.textContent = 'Notifications are blocked. You can re-enable them in your browser or phone settings.';
+        pushBtn.style.display = 'none';
+        return;
+      }
+
+      pushCard.style.display = '';
+      pushBtn.addEventListener('click', async () => {
+        pushBtn.disabled = true;
+        pushBtn.textContent = 'Enabling…';
+        try {
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') {
+            pushMsg.innerHTML = '<div class="msg error">Permission denied.</div>';
+            pushBtn.disabled = false;
+            pushBtn.textContent = 'Enable notifications';
+            return;
+          }
+          const keyRes = await fetch('/api/push/public-key');
+          const { publicKey } = await keyRes.json();
+          if (!publicKey) throw new Error('no public key');
+          const sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlB64ToUint8Array(publicKey),
+          });
+          const saveRes = await fetch('/api/push/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token, subscription: sub.toJSON() }),
+          });
+          if (!saveRes.ok) throw new Error('save failed');
+          pushBtn.textContent = '✓ Notifications on';
+          pushMsg.innerHTML = '<div class="msg success">You\'re all set!</div>';
+          setTimeout(() => { pushMsg.innerHTML = ''; }, 2500);
+        } catch (e) {
+          console.error(e);
+          pushMsg.innerHTML = '<div class="msg error">Something went wrong. Try again.</div>';
+          pushBtn.disabled = false;
+          pushBtn.textContent = 'Enable notifications';
+        }
+      });
+    }
+
+    function urlB64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(base64);
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; ++i) out[i] = raw.charCodeAt(i);
+      return out;
+    }
+
+    setupPush();
 
     async function load() {
       const [cfgRes, cardRes] = await Promise.all([

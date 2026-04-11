@@ -13,7 +13,8 @@
     "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
     "passkit-generator": "^3.3.1",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "web-push": "^3.6.7"
   },
   "engines": {
     "node": ">=22.5"

@@ -29,7 +29,14 @@ const {
   getAllCustomersForExport,
   getActiveCampaign,
   setCampaign,
+  savePushSubscription,
+  deletePushSubscriptionByEndpoint,
+  getPushSubscriptionsForCustomer,
+  getAllPushSubscriptions,
+  getPushSubscriptionsForCustomerIds,
 } = require('./db');
+
+const push = require('./push');
 
 const apple = require('./wallet/apple');
 const google = require('./wallet/google');
@@ -154,6 +161,7 @@ app.get('/api/config', (_req, res) => {
     shopName: SHOP_NAME,
     drinksRequired: DRINKS_REQUIRED,
     wallet: { apple: apple.isConfigured(), google: google.isConfigured() },
+    push: { enabled: push.isConfigured() },
   });
 });
 
@@ -384,6 +392,26 @@ app.post('/api/barista/purchase', requireStaff, (req, res) => {
     barista: req.staff.name,
     ...result,
   });
+
+  // Fire-and-forget push notifications. Not awaited so the barista gets an
+  // instant response even if the upstream push service is slow.
+  if (push.isConfigured()) {
+    if (result.freeAwarded) {
+      notifyCustomer(id, {
+        title: `🎁 Your free drink is ready at ${SHOP_NAME}!`,
+        body: `Congrats ${customer.name}, your ${DRINKS_REQUIRED}-stamp card is full. Next drink is on us!`,
+        url: '/card.html',
+        tag: 'free-drink',
+      }).catch(() => {});
+    } else if (result.stats.remaining === 1) {
+      notifyCustomer(id, {
+        title: `☕ One more to go, ${customer.name}!`,
+        body: `Just one more drink and your next one is free at ${SHOP_NAME}.`,
+        url: '/card.html',
+        tag: 'near-reward',
+      }).catch(() => {});
+    }
+  }
 });
 
 // Claim today's birthday free drink for a customer. Idempotent per calendar
@@ -426,10 +454,88 @@ app.post('/api/barista/lookup', requireStaff, (req, res) => {
   });
 });
 
+// ---------- web push ----------
+
+// Helper: fire-and-forget notification to every device of a given customer,
+// with automatic cleanup of expired subscriptions.
+async function notifyCustomer(customerId, payload) {
+  if (!push.isConfigured()) return;
+  const subs = getPushSubscriptionsForCustomer(customerId);
+  if (!subs.length) return;
+  const result = await push.sendToMany(subs, payload);
+  for (const ep of result.deadEndpoints) deletePushSubscriptionByEndpoint(ep);
+}
+
+// Public key (VAPID) so the browser can subscribe to this server specifically.
+app.get('/api/push/public-key', (_req, res) => {
+  if (!push.isConfigured()) return res.status(501).json({ error: 'Push not configured' });
+  res.json({ publicKey: push.publicKey() });
+});
+
+// Customer subscribes from their device. Body: { token, subscription }
+// where subscription is the PushSubscription.toJSON() from the browser.
+app.post('/api/push/subscribe', (req, res) => {
+  if (!push.isConfigured()) return res.status(501).json({ error: 'Push not configured' });
+  const token = String(req.body.token || '');
+  const customerId = verifyCustomerToken(token);
+  if (!customerId) return res.status(404).json({ error: 'invalid token' });
+  const sub = req.body.subscription;
+  if (
+    !sub ||
+    typeof sub.endpoint !== 'string' ||
+    !sub.keys ||
+    typeof sub.keys.p256dh !== 'string' ||
+    typeof sub.keys.auth !== 'string'
+  ) {
+    return res.status(400).json({ error: 'Invalid subscription payload' });
+  }
+  savePushSubscription(customerId, sub, req.get('user-agent') || null);
+  res.json({ ok: true });
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  if (!req.body || typeof req.body.endpoint !== 'string') {
+    return res.status(400).json({ error: 'endpoint required' });
+  }
+  deletePushSubscriptionByEndpoint(req.body.endpoint);
+  res.json({ ok: true });
+});
+
 // ---------- owner dashboard ----------
 
 app.get('/api/owner/stats', requireOwner, (_req, res) => {
   res.json(getOwnerStats());
+});
+
+// Owner-triggered broadcast: send a custom notification to all customers
+// or a specific segment. Body: { title, body, url?, segment? }
+// where segment is one of: 'all' | 'near-reward' | 'inactive-N'
+app.post('/api/owner/push/broadcast', requireOwner, async (req, res) => {
+  if (!push.isConfigured()) return res.status(501).json({ error: 'Push not configured' });
+  const title = (req.body.title || '').toString().trim();
+  const body = (req.body.body || '').toString().trim();
+  const url = typeof req.body.url === 'string' ? req.body.url : '/register.html';
+  const segment = (req.body.segment || 'all').toString();
+  if (!title && !body) return res.status(400).json({ error: 'Title or body required' });
+
+  // Resolve target customerIds.
+  let targetIds = null; // null = all
+  if (segment === 'near-reward') {
+    targetIds = getNearRewardCustomers().map((c) => c.id);
+  } else if (segment.startsWith('inactive-')) {
+    const days = parseInt(segment.slice('inactive-'.length), 10) || 30;
+    targetIds = getInactiveCustomers(days).map((c) => c.id);
+  }
+
+  const subs = targetIds
+    ? getPushSubscriptionsForCustomerIds(targetIds)
+    : getAllPushSubscriptions();
+  if (!subs.length) return res.json({ delivered: 0, total: 0 });
+
+  const payload = { title: title || 'The Peak', body, url, tag: 'owner-broadcast' };
+  const result = await push.sendToMany(subs, payload);
+  for (const ep of result.deadEndpoints) deletePushSubscriptionByEndpoint(ep);
+  res.json({ delivered: result.delivered, total: subs.length });
 });
 
 // Customer segments for targeted marketing.

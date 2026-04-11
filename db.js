@@ -82,6 +82,18 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id TEXT NOT NULL,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    user_agent TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_push_customer ON push_subscriptions(customer_id);
 `);
 
 const DRINKS_REQUIRED = parseInt(process.env.DRINKS_REQUIRED || '6', 10);
@@ -488,6 +500,55 @@ function getAllCustomersForExport() {
   }));
 }
 
+// ---------- push subscriptions ----------
+
+function savePushSubscription(customerId, subscription, userAgent) {
+  db.prepare(
+    `INSERT INTO push_subscriptions
+       (customer_id, endpoint, p256dh, auth, user_agent, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET
+       customer_id = excluded.customer_id,
+       p256dh = excluded.p256dh,
+       auth = excluded.auth,
+       user_agent = excluded.user_agent`
+  ).run(
+    customerId,
+    subscription.endpoint,
+    subscription.keys.p256dh,
+    subscription.keys.auth,
+    userAgent || null,
+    Date.now()
+  );
+}
+
+function deletePushSubscriptionByEndpoint(endpoint) {
+  db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
+}
+
+function getPushSubscriptionsForCustomer(customerId) {
+  return db
+    .prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE customer_id = ?')
+    .all(customerId);
+}
+
+function getAllPushSubscriptions() {
+  return db
+    .prepare('SELECT customer_id, endpoint, p256dh, auth FROM push_subscriptions')
+    .all();
+}
+
+function getPushSubscriptionsForCustomerIds(customerIds) {
+  if (!customerIds || !customerIds.length) return [];
+  const placeholders = customerIds.map(() => '?').join(',');
+  return db
+    .prepare(
+      `SELECT customer_id, endpoint, p256dh, auth FROM push_subscriptions
+        WHERE customer_id IN (${placeholders})`
+    )
+    .all(...customerIds);
+}
+
 // ---------- settings / campaign ----------
 
 function getSetting(key) {
@@ -578,4 +639,10 @@ module.exports = {
   getAllCustomersForExport,
   getActiveCampaign,
   setCampaign,
+  // push
+  savePushSubscription,
+  deletePushSubscriptionByEndpoint,
+  getPushSubscriptionsForCustomer,
+  getAllPushSubscriptions,
+  getPushSubscriptionsForCustomerIds,
 };

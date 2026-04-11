@@ -117,6 +117,57 @@ The card page will then show a **Save to Google Wallet** button which hits `/api
 
 > **Note on live updates**: refreshing the stamp count inside the wallet pass (so it updates automatically after a scan) requires Apple's APNs push for `.pkpass` and Google's Wallet Object `update` API. Both require additional registration endpoints; not wired up here. For now the in-wallet pass is a snapshot — but `/card.html` always shows live data and auto-refreshes every 30 s, which is usually good enough for a small shop.
 
+## Web Push notifications (optional, no app stores required)
+
+Customers who have installed the loyalty card to their home screen (Add to Home Screen) can opt in to native push notifications. The server sends them automatically when:
+
+- A customer's card reaches `required - 1` stamps → "☕ One more to go!"
+- A customer earns a free drink → "🎁 Your free drink is ready!"
+
+The owner can also send ad-hoc broadcasts from `/dashboard.html` ("Drink of the week", new launches, etc.) to **all subscribers** or to any segment (near-reward, inactive-N-days).
+
+**Compatibility:**
+- Android Chrome, Firefox, Edge — works everywhere.
+- Desktop Chrome, Firefox, Edge, Safari (macOS) — works everywhere.
+- iOS Safari 16.4+ — works **only** when the PWA is installed to the home screen and opened from there. iOS does not support Web Push from a browser tab. The card page shows platform-specific instructions on iPhone so users know to install first.
+
+**Setup (one-time):**
+
+1. Generate a VAPID keypair. This is a free, open-standard identifier — no accounts, no fees:
+   ```bash
+   npx web-push generate-vapid-keys
+   ```
+   It prints a public and private key.
+
+2. Set the three secrets on Railway (or `.env` for local):
+   ```bash
+   flyctl secrets set \
+     VAPID_PUBLIC_KEY="<public key>" \
+     VAPID_PRIVATE_KEY="<private key>" \
+     VAPID_SUBJECT="mailto:you@yourshop.com" \
+     --app thepeak-loyalty
+   ```
+   or on Railway: Variables → Raw Editor → append:
+   ```
+   VAPID_PUBLIC_KEY="<public>"
+   VAPID_PRIVATE_KEY="<private>"
+   VAPID_SUBJECT="mailto:you@yourshop.com"
+   ```
+
+3. Redeploy. On boot `/api/config` now advertises `push.enabled: true`, and:
+   - `card.html` shows the "🔔 Get notified" card with an enable button
+   - `dashboard.html` shows the "Send push notification" composer
+
+Zero Apple Developer account, zero Play Store, zero review. The customer's browser talks to Google's FCM / Apple's APNs / Mozilla's Push via the standard W3C Push Protocol — you never deal with either vendor directly.
+
+**Trying it out:**
+1. Open your deployed card page on an Android phone.
+2. Tap **🔔 Enable notifications**, grant the permission.
+3. From another device, sign into `/dashboard.html` as the owner and send a test broadcast — your phone should buzz within seconds.
+4. Tap the notification → the card opens.
+
+> If you haven't generated VAPID keys, the app still runs normally — the push endpoints return 501 and the subscribe button stays hidden. Enabling it is a no-downtime change, add it whenever you're ready.
+
 ## Project layout
 
 ```

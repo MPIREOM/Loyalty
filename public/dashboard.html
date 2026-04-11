@@ -191,6 +191,26 @@
         <div id="seg-empty" class="subtle" style="display:none">Nobody in this group right now.</div>
       </div>
 
+      <!-- Push notification broadcaster -->
+      <div class="card" id="push-card" style="display:none">
+        <h2 style="margin-top:0">🔔 Send push notification</h2>
+        <p class="subtle">Instantly notify every subscribed customer. Unlike WhatsApp, this doesn't use your phone — the server sends it directly to their device.</p>
+        <label for="push-title">Title</label>
+        <input id="push-title" type="text" maxlength="60" placeholder="e.g. Drink of the week" />
+        <label for="push-body">Message</label>
+        <textarea id="push-body" maxlength="200" placeholder="e.g. Try our new Saffron Latte — 20% off all day today ☕"></textarea>
+        <label for="push-segment">Send to</label>
+        <select id="push-segment" style="width:100%;padding:14px 16px;background:#1a1410;border:1px solid #3a2d22;border-radius:12px;color:var(--text);font-size:16px;">
+          <option value="all">Everyone (subscribed)</option>
+          <option value="near-reward">One drink from free</option>
+          <option value="inactive-14">Not seen 14 days</option>
+          <option value="inactive-30">Not seen 30 days</option>
+          <option value="inactive-60">Not seen 60 days</option>
+        </select>
+        <div id="push-msg"></div>
+        <button id="push-send">Send notification</button>
+      </div>
+
       <!-- CSV export -->
       <div class="card">
         <h2 style="margin-top:0">Export customer list</h2>
@@ -571,6 +591,45 @@
     }
     document.getElementById('camp-save').addEventListener('click', () => saveCampaign(false));
     document.getElementById('camp-clear').addEventListener('click', () => saveCampaign(true));
+
+    // ---- push broadcaster ----
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+      if (cfg && cfg.push && cfg.push.enabled) {
+        document.getElementById('push-card').style.display = '';
+      }
+    });
+    document.getElementById('push-send').addEventListener('click', async () => {
+      const title = document.getElementById('push-title').value.trim();
+      const body  = document.getElementById('push-body').value.trim();
+      const segment = document.getElementById('push-segment').value;
+      const msg = document.getElementById('push-msg');
+      if (!title && !body) {
+        msg.innerHTML = '<div class="msg error">Enter a title or message.</div>';
+        return;
+      }
+      const btn = document.getElementById('push-send');
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/owner/push/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ownerToken },
+          body: JSON.stringify({ title, body, segment }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          msg.innerHTML = `<div class="msg error">${data.error || 'Send failed.'}</div>`;
+          return;
+        }
+        msg.innerHTML = `<div class="msg success">Sent to ${data.delivered} / ${data.total} device${data.total === 1 ? '' : 's'}.</div>`;
+        document.getElementById('push-title').value = '';
+        document.getElementById('push-body').value = '';
+        setTimeout(() => { msg.innerHTML = ''; }, 5000);
+      } catch {
+        msg.innerHTML = '<div class="msg error">Network error.</div>';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Send notification';
+      }
+    });
 
     // ---- CSV export ----
     document.getElementById('csv-btn').addEventListener('click', async () => {
