@@ -2,9 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
   <title>My Loyalty Card</title>
   <link rel="stylesheet" href="/styles.css" />
+
+  <!-- Install as a home-screen app on iOS + Android -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/thePeak_logo_color.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="The Peak" />
+  <meta name="theme-color" content="#1a1410" />
 </head>
 <body>
   <div class="wrap">
@@ -19,15 +27,19 @@
 
       <div id="progress-line" class="subtle" style="text-align:center;margin-bottom:8px;"></div>
 
-      <div class="qr-box">
+      <div class="qr-box" id="qr-box">
         <img id="qr" alt="Your loyalty QR" />
       </div>
-      <p class="subtle" style="text-align:center;margin:4px 0 0">Show this QR to the barista at each visit.</p>
+      <p class="subtle" style="text-align:center;margin:4px 0 0">
+        Tap the QR for a brighter, fullscreen view. Show it to the barista at each visit.
+      </p>
     </div>
 
-    <div class="card" id="wallet-card" style="display:none">
-      <h2 style="margin-top:0">Add to your phone</h2>
-      <p>Save your card so it's always one tap away.</p>
+    <!-- "Save to your phone" card: PWA install prompt + optional wallet passes -->
+    <div class="card" id="install-card">
+      <h2 style="margin-top:0">Save to your phone</h2>
+      <p id="install-hint">One-tap access to your card — no app store required.</p>
+      <button id="install-btn" style="display:none">➕ Add to Home Screen</button>
       <div class="wallet-btns">
         <a id="apple-btn" href="#" style="display:none">  Add to Apple Wallet</a>
         <a id="google-btn" href="#" target="_blank" rel="noopener" style="display:none">Save to Google Wallet</a>
@@ -44,11 +56,66 @@
     </p>
   </div>
 
+  <!-- Fullscreen QR overlay (shown when the customer taps the QR) -->
+  <div id="qr-overlay" style="display:none;position:fixed;inset:0;background:#fff;z-index:999;align-items:center;justify-content:center;flex-direction:column;padding:20px;">
+    <img id="qr-big" alt="Your loyalty QR" style="width:min(90vw,90vh);height:auto;image-rendering:pixelated;" />
+    <p style="color:#333;margin-top:20px;font-family:-apple-system,sans-serif;">Tap to close</p>
+  </div>
+
   <script>
     const token = location.hash.slice(1);
     if (!token) location.href = '/register.html';
 
     document.getElementById('save-link').href = location.href;
+
+    // Tap the QR → fullscreen white background at max brightness, which is
+    // what baristas actually need to scan reliably in low light.
+    const overlay = document.getElementById('qr-overlay');
+    const qrBig = document.getElementById('qr-big');
+    document.getElementById('qr-box').addEventListener('click', () => {
+      qrBig.src = document.getElementById('qr').src;
+      overlay.style.display = 'flex';
+      // Request fullscreen — forces many phones to max brightness.
+      if (document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+    });
+    overlay.addEventListener('click', () => {
+      overlay.style.display = 'none';
+      if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    });
+
+    // Android Chrome fires beforeinstallprompt when the PWA criteria are met.
+    // iOS Safari doesn't support this event, so we show a manual hint instead.
+    let deferredPrompt = null;
+    const installBtn = document.getElementById('install-btn');
+    const installHint = document.getElementById('install-hint');
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      installBtn.style.display = '';
+    });
+    installBtn.addEventListener('click', async () => {
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+      deferredPrompt = null;
+      installBtn.style.display = 'none';
+    });
+
+    // Show platform-specific text for iOS (no install API in Safari).
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches ||
+                         window.navigator.standalone === true;
+    if (isStandalone) {
+      // Already installed — don't nag.
+      document.getElementById('install-card').style.display = 'none';
+    } else if (isIOS) {
+      installHint.innerHTML =
+        'Tap <b>Share <span style="font-family:system-ui">⬆</span></b> at the bottom of Safari, ' +
+        'then <b>Add to Home Screen</b>. Your card becomes a one-tap icon.';
+    }
 
     async function load() {
       const [cfgRes, cardRes] = await Promise.all([
@@ -87,24 +154,21 @@
 
       document.getElementById('qr').src = '/api/qr/' + encodeURIComponent(token);
 
-      // wallet
-      if (cfg.wallet.apple || cfg.wallet.google) {
-        document.getElementById('wallet-card').style.display = '';
-        if (cfg.wallet.apple) {
-          const a = document.getElementById('apple-btn');
-          a.href = '/api/wallet/apple/' + encodeURIComponent(token);
-          a.style.display = '';
-        }
-        if (cfg.wallet.google) {
-          const g = document.getElementById('google-btn');
-          g.style.display = '';
-          g.addEventListener('click', async (e) => {
-            e.preventDefault();
-            const res = await fetch('/api/wallet/google/' + encodeURIComponent(token));
-            const j = await res.json();
-            if (j.url) window.open(j.url, '_blank');
-          });
-        }
+      // Optional wallet passes (only shown when configured on the server).
+      if (cfg.wallet.apple) {
+        const a = document.getElementById('apple-btn');
+        a.href = '/api/wallet/apple/' + encodeURIComponent(token);
+        a.style.display = '';
+      }
+      if (cfg.wallet.google) {
+        const g = document.getElementById('google-btn');
+        g.style.display = '';
+        g.addEventListener('click', async (e) => {
+          e.preventDefault();
+          const res = await fetch('/api/wallet/google/' + encodeURIComponent(token));
+          const j = await res.json();
+          if (j.url) window.open(j.url, '_blank');
+        });
       }
 
       // recent

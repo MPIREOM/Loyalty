@@ -2,9 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
   <title>Barista Console</title>
   <link rel="stylesheet" href="/styles.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/thePeak_logo_color.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="The Peak Staff" />
+  <meta name="theme-color" content="#1a1410" />
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -42,6 +48,18 @@
       <p class="subtle" id="welcome" style="margin-top:0"></p>
       <div id="reader"></div>
       <div id="scan-msg"></div>
+      <button id="manual-btn" class="secondary" style="margin-top:12px">Enter phone number instead</button>
+    </div>
+
+    <!-- Manual phone lookup -->
+    <div class="card" id="manual-card" style="display:none">
+      <h2 style="margin-top:0">Find customer by phone</h2>
+      <p>For when scanning isn't working — enter the customer's Omani mobile number.</p>
+      <label for="lookup-phone">Mobile number</label>
+      <input id="lookup-phone" type="tel" inputmode="tel" autocomplete="off" placeholder="9XXX XXXX" />
+      <div id="lookup-msg"></div>
+      <button id="lookup-btn">Find customer</button>
+      <button id="lookup-back" class="secondary">Back to scanner</button>
     </div>
 
     <!-- Customer detail -->
@@ -57,12 +75,12 @@
   </div>
 
   <script>
-    // Long-lived token lives in localStorage so the barista stays signed in
-    // on their personal device for 30 days.
+    // Long-lived token (10 years) lives in localStorage so the barista stays
+    // signed in on their personal device essentially forever.
     let baristaToken = localStorage.getItem('baristaToken') || null;
     let baristaName  = localStorage.getItem('baristaName')  || null;
     let scanner = null;
-    let currentToken = null;
+    let currentCustomerId = null;
     let pendingPhone = null;
 
     fetch('/api/config').then(r => r.json()).then(cfg => {
@@ -70,10 +88,35 @@
     });
 
     function show(id) {
-      ['phone-card','code-card','scanner-card','customer-card'].forEach(x => {
+      ['phone-card','code-card','scanner-card','manual-card','customer-card'].forEach(x => {
         document.getElementById(x).style.display = x === id ? '' : 'none';
       });
     }
+
+    // ----- Beep + haptic feedback -----
+    // A tiny WebAudio blip so the barista knows the scan registered without
+    // looking at the screen. Works on both iOS and Android after any first
+    // user tap on the page (which is always the login button).
+    let audioCtx = null;
+    function beep(freq = 880, duration = 120) {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.value = freq;
+        g.gain.value = 0.1;
+        o.connect(g); g.connect(audioCtx.destination);
+        o.start();
+        o.stop(audioCtx.currentTime + duration / 1000);
+      } catch {}
+    }
+    function buzz(ms = 80) {
+      if (navigator.vibrate) navigator.vibrate(ms);
+    }
+    function feedbackSuccess() { beep(880, 120); buzz(60); }
+    function feedbackReward()  { beep(660, 80); setTimeout(() => beep(990, 160), 100); buzz(200); }
+    function feedbackError()   { beep(220, 250); buzz(300); }
 
     // ----- Step 1: request code -----
     async function requestCode() {
@@ -157,21 +200,22 @@
       localStorage.removeItem('baristaToken');
       localStorage.removeItem('baristaName');
       baristaToken = null; baristaName = null;
-      if (scanner) { try { scanner.stop(); } catch {} }
+      stopScanner();
       show('phone-card');
     });
 
-    // ----- customer rendering + scanning -----
+    // ----- customer rendering -----
     function renderCustomer(data) {
       document.getElementById('c-name').textContent = data.customer.name;
       document.getElementById('c-phone').textContent = data.customer.phone || '';
+      currentCustomerId = data.customer.id;
       const el = document.getElementById('c-stamps');
       el.innerHTML = '';
       el.style.gridTemplateColumns = `repeat(${Math.min(6, data.stats.required)}, 1fr)`;
       for (let i = 0; i < data.stats.required; i++) {
         const d = document.createElement('div');
         d.className = 'stamp' + (i < data.stats.progress ? ' filled' : '');
-        d.textContent = i < data.stats.progress ? '☕' : (i + 1);
+        d.textContent = '☕';
         el.appendChild(d);
       }
       const p = document.getElementById('c-progress');
@@ -182,17 +226,33 @@
       }
     }
 
+    // ----- scanner -----
+    async function stopScanner() {
+      if (scanner) {
+        try { await scanner.stop(); } catch {}
+        try { await scanner.clear(); } catch {}
+        scanner = null;
+      }
+    }
+
     async function startScanner() {
       show('scanner-card');
+      document.getElementById('scan-msg').innerHTML = '';
       document.getElementById('welcome').textContent = baristaName ? `Signed in as ${baristaName}` : '';
-      if (scanner) { try { await scanner.clear(); } catch {} }
+      await stopScanner();
       scanner = new Html5Qrcode('reader');
       try {
         await scanner.start(
           { facingMode: 'environment' },
-          { fps: 10, qrbox: { width: 260, height: 260 } },
+          {
+            fps: 15,
+            qrbox: (w, h) => {
+              const m = Math.floor(Math.min(w, h) * 0.8);
+              return { width: m, height: m };
+            },
+          },
           async (decoded) => {
-            await scanner.stop();
+            await stopScanner();
             await handleScan(decoded);
           },
           () => {}
@@ -204,52 +264,114 @@
     }
 
     async function handleScan(token) {
-      currentToken = token;
       const res = await fetch('/api/barista/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + baristaToken },
         body: JSON.stringify({ token }),
       });
-      if (res.status === 401) {
-        localStorage.removeItem('baristaToken');
-        localStorage.removeItem('baristaName');
-        baristaToken = null; baristaName = null;
-        show('phone-card');
-        return;
-      }
+      if (res.status === 401) return signOutExpired();
       const data = await res.json();
       if (!res.ok) {
+        feedbackError();
         document.getElementById('scan-msg').innerHTML = `<div class="msg error">${data.error || 'Invalid QR'}</div>`;
         setTimeout(startScanner, 1500);
         return;
       }
+      feedbackSuccess();
       document.getElementById('action-msg').innerHTML = '';
       renderCustomer(data);
       show('customer-card');
     }
 
+    function signOutExpired() {
+      localStorage.removeItem('baristaToken');
+      localStorage.removeItem('baristaName');
+      baristaToken = null; baristaName = null;
+      show('phone-card');
+    }
+
+    // ----- manual phone lookup -----
+    document.getElementById('manual-btn').addEventListener('click', async () => {
+      await stopScanner();
+      document.getElementById('lookup-phone').value = '';
+      document.getElementById('lookup-msg').innerHTML = '';
+      show('manual-card');
+      document.getElementById('lookup-phone').focus();
+    });
+    document.getElementById('lookup-back').addEventListener('click', startScanner);
+    async function doLookup() {
+      const phone = document.getElementById('lookup-phone').value.trim();
+      if (!phone) return;
+      const btn = document.getElementById('lookup-btn');
+      btn.disabled = true; btn.textContent = 'Searching…';
+      try {
+        const res = await fetch('/api/barista/lookup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + baristaToken },
+          body: JSON.stringify({ phone }),
+        });
+        if (res.status === 401) return signOutExpired();
+        const data = await res.json();
+        if (!res.ok) {
+          feedbackError();
+          document.getElementById('lookup-msg').innerHTML =
+            `<div class="msg error">${data.error || 'Not found.'}</div>`;
+          return;
+        }
+        feedbackSuccess();
+        document.getElementById('action-msg').innerHTML = '';
+        renderCustomer(data);
+        show('customer-card');
+      } catch {
+        document.getElementById('lookup-msg').innerHTML =
+          '<div class="msg error">Network error. Try again.</div>';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Find customer';
+      }
+    }
+    document.getElementById('lookup-btn').addEventListener('click', doLookup);
+    document.getElementById('lookup-phone').addEventListener('keydown', e => { if (e.key === 'Enter') doLookup(); });
+
+    // ----- add drink -----
     document.getElementById('add-btn').addEventListener('click', async () => {
+      if (!currentCustomerId) return;
+      const btn = document.getElementById('add-btn');
+      btn.disabled = true;
       const res = await fetch('/api/barista/purchase', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + baristaToken },
-        body: JSON.stringify({ token: currentToken }),
+        body: JSON.stringify({ customerId: currentCustomerId }),
       });
+      if (res.status === 401) return signOutExpired();
       const data = await res.json();
+      btn.disabled = false;
       if (!res.ok) {
+        feedbackError();
         document.getElementById('action-msg').innerHTML = `<div class="msg error">${data.error || 'Error'}</div>`;
         return;
       }
       renderCustomer({ customer: data.customer, stats: data.stats });
       if (data.freeAwarded) {
+        feedbackReward();
         document.getElementById('action-msg').innerHTML =
           '<div class="msg success">🎁 Free drink awarded! Card reset.</div>';
       } else {
+        feedbackSuccess();
         document.getElementById('action-msg').innerHTML =
           `<div class="msg success">✓ Drink added. ${data.stats.remaining} to go.</div>`;
       }
+      // Auto-return to scanner after 2.5s so the next customer flows quickly.
+      // Stays on the same customer if the barista taps +Add drink again.
+      clearTimeout(window.__autoNext);
+      window.__autoNext = setTimeout(() => {
+        if (document.getElementById('customer-card').style.display !== 'none') startScanner();
+      }, 2500);
     });
 
-    document.getElementById('back-btn').addEventListener('click', startScanner);
+    document.getElementById('back-btn').addEventListener('click', () => {
+      clearTimeout(window.__autoNext);
+      startScanner();
+    });
 
     if (baristaToken) startScanner();
   </script>

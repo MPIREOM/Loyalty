@@ -292,9 +292,16 @@ app.post('/api/barista/verify-code', otpVerifyLimiter, (req, res) => {
   });
 });
 
+// Accept either a QR token (from scanning) or a bare customerId (from the
+// manual phone lookup fallback). Both endpoints already require staff auth.
+function resolveCustomerId(body) {
+  if (body.customerId && typeof body.customerId === 'string') return body.customerId;
+  if (body.token && typeof body.token === 'string') return verifyCustomerToken(body.token);
+  return null;
+}
+
 app.post('/api/barista/scan', requireStaff, (req, res) => {
-  const token = String(req.body.token || '');
-  const id = verifyCustomerToken(token);
+  const id = resolveCustomerId(req.body);
   if (!id) return res.status(404).json({ error: 'Invalid customer QR' });
   const customer = getCustomer(id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -305,8 +312,7 @@ app.post('/api/barista/scan', requireStaff, (req, res) => {
 });
 
 app.post('/api/barista/purchase', requireStaff, (req, res) => {
-  const token = String(req.body.token || '');
-  const id = verifyCustomerToken(token);
+  const id = resolveCustomerId(req.body);
   if (!id) return res.status(404).json({ error: 'Invalid customer QR' });
   const customer = getCustomer(id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -318,10 +324,53 @@ app.post('/api/barista/purchase', requireStaff, (req, res) => {
   });
 });
 
+// Manual phone number lookup — fallback when scanning the QR isn't working
+// (scratched screen, dim phone, awkward angle, customer forgot their card).
+app.post('/api/barista/lookup', requireStaff, (req, res) => {
+  const phone = normalizeOmaniPhone(req.body.phone);
+  if (!phone) return res.status(400).json({ error: 'Enter a valid Omani mobile number.' });
+  const customer = getCustomerByPhone(phone);
+  if (!customer) {
+    return res.status(404).json({
+      error: 'No loyalty card for that number. Ask them to scan the shop QR to join.',
+    });
+  }
+  res.json({
+    customer: { id: customer.id, name: customer.name, phone: customer.phone },
+    stats: getStats(customer.id),
+  });
+});
+
 // ---------- owner dashboard ----------
 
 app.get('/api/owner/stats', requireOwner, (_req, res) => {
   res.json(getOwnerStats());
+});
+
+// ---------- PWA manifest ----------
+
+// Dynamic web manifest so "Add to Home Screen" on iOS/Android gives a
+// nicely-branded icon using the shop name from env. The icon itself is
+// served as a static file from /public.
+app.get('/manifest.webmanifest', (_req, res) => {
+  res.type('application/manifest+json').json({
+    name: `${SHOP_NAME} Loyalty`,
+    short_name: SHOP_NAME,
+    description: `Buy ${DRINKS_REQUIRED} drinks, get the next one free.`,
+    start_url: '/register.html',
+    display: 'standalone',
+    orientation: 'portrait',
+    background_color: '#1a1410',
+    theme_color: '#c89666',
+    icons: [
+      {
+        src: '/thePeak_logo_color.png',
+        sizes: 'any',
+        type: 'image/png',
+        purpose: 'any maskable',
+      },
+    ],
+  });
 });
 
 // ---------- health + root ----------
